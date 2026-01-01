@@ -85,7 +85,7 @@ def get_stock_indicators(sym: str):
         
         sma200 = float(h_full["SMA_200"].iloc[-1]) if "SMA_200" in h_full.columns else None
         
-        h_recent = h_full.iloc[-60:].copy() if len(h_full) > 60 else h_full.copy()
+        h_recent = h_full.iloc[-60:].copy() if len(h_recent) > 60 else h_full.copy()
         if len(h_recent) == 0: return None, None, None, None, None
         
         spot_val = float(h_recent["Close"].iloc[-1])
@@ -1439,7 +1439,7 @@ def run_rsi_scanner_app(df_global):
                                 continue
                                 
                             entry_prices = full_close[valid_indices]
-                            exit_prices = full_indices + p]
+                            exit_prices = full_close[valid_indices + p]
                             
                             returns = (exit_prices - entry_prices) / entry_prices
                             
