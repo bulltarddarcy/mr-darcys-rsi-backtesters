@@ -889,8 +889,8 @@ def run_rsi_scanner_app(df_global):
 
     # New Filter States
     if 'saved_rsi_min_pf' not in st.session_state: st.session_state.saved_rsi_min_pf = 2.0
-    if 'saved_rsi_min_wr' not in st.session_state: st.session_state.saved_rsi_min_wr = 75
-    if 'saved_rsi_min_ev' not in st.session_state: st.session_state.saved_rsi_min_ev = 10.0
+    if 'saved_rsi_min_wr' not in st.session_state: st.session_state.saved_rsi_min_wr = 60
+    if 'saved_rsi_min_ev' not in st.session_state: st.session_state.saved_rsi_min_ev = 5.0
     if 'saved_rsi_min_sqn' not in st.session_state: st.session_state.saved_rsi_min_sqn = 3.0
 
     def save_rsi_state(key, saved_key):
@@ -1152,27 +1152,34 @@ def run_rsi_scanner_app(df_global):
                             with res_col2:
                                 # --- NEW TABLE: ALL TICKERS SUMMARY ---
                                 st.subheader("Results Summary")
+                                
+                                # Calculate Overall Effective ROI
+                                # Effective ROI = Total Strategy Return / Max Active Trades
+                                # If Max Active is 0 (no trades), ROI is 0
+                                overall_eff_roi = df_res['BT_Return'].sum() / max_active if max_active > 0 else 0.0
+
                                 agg_all = pd.DataFrame([{
                                     "N_Trades": len(df_res),
                                     "Avg_Hold": df_res['BT_Hold_Days'].mean(),
-                                    "Overall_Return": df_res['BT_Return'].sum(),
+                                    "Effective_ROI": overall_eff_roi,
                                     "Avg_Active": avg_active,
                                     "Max_Active": max_active
                                 }])
+                                
                                 st.dataframe(
                                     agg_all.style
                                     .format({
                                         "Avg_Hold": "{:.1f} d", 
-                                        "Overall_Return": fmt_pct,
+                                        "Effective_ROI": fmt_pct,
                                         "N_Trades": "{:,}",
                                         "Avg_Active": "{:,.0f}",
                                         "Max_Active": "{:,.0f}"
                                     })
-                                    .map(color_ret, subset=["Overall_Return"]),
+                                    .map(color_ret, subset=["Effective_ROI"]),
                                     column_config={
                                         "N_Trades": "Total N",
                                         "Avg_Hold": "Avg Hold Time",
-                                        "Overall_Return": "Overall Return",
+                                        "Effective_ROI": st.column_config.TextColumn("Effective ROI", help="Total Return / Max Active. Represents return on peak capital required."),
                                         "Avg_Active": "Avg Active",
                                         "Max_Active": "Max Active"
                                     },
@@ -1263,7 +1270,7 @@ def run_rsi_scanner_app(df_global):
                                     **"Apples-to-Apples" Comparison:**
                                     * **Same Dates:** The Index (SPY/QQQ) is "bought" on the exact same Entry Date and "sold" on the exact same Exit Date as the strategy signal.
                                     * **Same Position Size:** Returns are calculated assuming an equal dollar amount allocated to every trade.
-                                    * **No Look-Ahead:** The index trade uses the Strategy's optimal holding period (determined by historical data prior to the signal).
+                                    * **Effective ROI:** Calculates the return on the *actual capital required* to trade the strategy (accounting for peak congestion), rather than just summing up percentages.
                                     """)
 
                                 # Add Year Column based on EXIT date
@@ -1277,41 +1284,69 @@ def run_rsi_scanner_app(df_global):
                                 
                                 bm_rows = []
                                 
+                                # Helper to get Max Active for a specific subset
+                                def get_max_active_for_subset(sub_df):
+                                    if sub_df.empty: return 0
+                                    e_counts = sub_df['BT_Entry_Date'].value_counts()
+                                    x_counts = (sub_df['BT_Exit_Date'] + timedelta(days=1)).value_counts()
+                                    tl = pd.DataFrame({'Entries': e_counts, 'Exits': x_counts}).fillna(0).sort_index()
+                                    if tl.empty: return 0
+                                    # Fill gaps
+                                    idx = pd.date_range(tl.index.min(), tl.index.max())
+                                    tl = tl.reindex(idx).fillna(0)
+                                    tl['Net'] = tl['Entries'] - tl['Exits']
+                                    tl['Active'] = tl['Net'].cumsum()
+                                    return tl['Active'].max()
+
                                 # Calculate Annual Rows
                                 for y in years:
-                                    # Trades ending in Year y
+                                    # Trades ending in Year y (Realized P&L)
                                     ended_in_y = df_res[df_res['Exit_Year'] == y]
                                     started_in_y = df_res[df_res['Start_Year'] == y]
                                     
-                                    # If no trades ended this year, we still show the row with 0s? 
-                                    # Or skip? Usually nicer to show 0s.
-                                    strat_ret = ended_in_y['BT_Return'].sum()
+                                    strat_ret_sum = ended_in_y['BT_Return'].sum()
                                     spy_ret = ended_in_y['SPY_Ret'].sum()
                                     qqq_ret = ended_in_y['QQQ_Ret'].sum()
                                     
+                                    # Calculate Max Active specifically for this year
+                                    # Filter the global events_df for dates within year Y
+                                    max_active_y = 0
+                                    if not events_df.empty:
+                                        # events_df index is DatetimeIndex
+                                        events_y = events_df[events_df.index.year == y]
+                                        if not events_y.empty:
+                                            max_active_y = events_y['Active_Count'].max()
+                                    
+                                    # Effective ROI = Total Return / Max Active Units
+                                    # This represents "Profit / Peak Capital Deployed"
+                                    eff_roi = strat_ret_sum / max_active_y if max_active_y > 0 else 0.0
+                                    
                                     bm_rows.append({
                                         "Year": str(y),
-                                        "Strategy Return": strat_ret,
+                                        "Effective ROI": eff_roi,
                                         "SPY Return": spy_ret,
                                         "QQQ Return": qqq_ret,
                                         "N_Start": len(started_in_y),
-                                        "N_End": len(ended_in_y)
+                                        "N_End": len(ended_in_y),
+                                        "Max_Active": max_active_y
                                     })
                                 
                                 # Calculate Overall Row (Last)
-                                ov_strat = df_res['BT_Return'].sum()
+                                ov_strat_sum = df_res['BT_Return'].sum()
                                 ov_spy = df_res['SPY_Ret'].sum()
                                 ov_qqq = df_res['QQQ_Ret'].sum()
-                                ov_n_start = len(df_res)
-                                ov_n_end = len(df_res)
+                                
+                                # Overall Max Active was calculated earlier as 'max_active' in the Results Summary section
+                                ov_eff_roi = ov_strat_sum / max_active if max_active > 0 else 0.0
                                 
                                 bm_rows.append({
                                     "Year": "Overall",
-                                    "Strategy Return": ov_strat,
+                                    "Effective ROI": ov_eff_roi,
                                     "SPY Return": ov_spy,
                                     "QQQ Return": ov_qqq,
-                                    "N_Start": ov_n_start,
-                                    "N_End": ov_n_end
+                                    "N_Start": len(df_res),
+                                    "N_End": len(df_res),
+                                    "Max_Active": max_active
                                 })
 
                                 bm_df = pd.DataFrame(bm_rows)
@@ -1319,7 +1354,6 @@ def run_rsi_scanner_app(df_global):
                                 def highlight_bm(row):
                                     styles = [''] * len(row)
                                     if row['Year'] == "Overall":
-                                        # Only bold the Year and N_End, let color_ret handle the numbers
                                         return ['font-weight: bold; background-color: #f0f2f6; border-top: 2px solid #ccc'] * len(row)
                                     return styles
 
@@ -1327,18 +1361,20 @@ def run_rsi_scanner_app(df_global):
                                     bm_df.style
                                     .apply(highlight_bm, axis=1)
                                     .format({
-                                        "Strategy Return": fmt_pct,
+                                        "Effective ROI": fmt_pct,
                                         "SPY Return": fmt_pct,
                                         "QQQ Return": fmt_pct,
                                         "N_Start": "{:,}",
-                                        "N_End": "{:,}"
+                                        "N_End": "{:,}",
+                                        "Max_Active": "{:,.0f}"
                                     }),
-                                    # REMOVED color_ret map per instruction (a)
                                     hide_index=True,
                                     use_container_width=True,
                                     column_config={
                                         "N_Start": st.column_config.TextColumn("N Start"),
-                                        "N_End": st.column_config.TextColumn("N End")
+                                        "N_End": st.column_config.TextColumn("N End"),
+                                        "Max_Active": st.column_config.TextColumn("Max Active", help="Peak number of simultaneous trades in this period"),
+                                        "Effective ROI": st.column_config.TextColumn("Effective ROI", help="Strategy Profit / Peak Capital Required. This is the return on the cash you actually needed to trade the system.")
                                     }
                                 )
 
