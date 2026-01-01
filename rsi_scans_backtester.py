@@ -1033,15 +1033,41 @@ def run_rsi_scanner_app(df_global):
 
                     # --- DISPLAY RESULTS (From Session State) ---
                     if 'bt_results_df' in st.session_state and not st.session_state.bt_results_df.empty:
-                        df_res = st.session_state.bt_results_df
+                        df_res_full = st.session_state.bt_results_df
                         
                         # Need to re-fetch benchmark strictly for the Buy&Hold section (since it uses separate start/end dates logic)
                         # Since fetch_benchmark_data is cached, this is effectively instant
                         spy_df, qqq_df = fetch_benchmark_data() 
 
-                        # --- CALCULATE ACTIVE TRADES STATS ---
-                        # Logic: +1 to count on Entry Day, -1 to count on (Exit Day + 1)
-                        if not df_res.empty:
+                        # --- FILTER SECTION ---
+                        f_col1, f_col2 = st.columns([1, 3])
+                        with f_col1:
+                            ticker_input_bt = st.text_input("Ticker Filter (blank=all)", key="rsi_bt_ticker_input_filter").strip().upper()
+                        
+                        # Apply Filter
+                        if ticker_input_bt:
+                            df_res = df_res_full[df_res_full['Ticker'] == ticker_input_bt].copy()
+                        else:
+                            df_res = df_res_full.copy()
+
+                        with f_col2:
+                            # Spacer
+                            st.write("")
+                            st.write("")
+                            # CSV Download (Downloads the filtered view)
+                            csv = df_res.to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label="Download Signals",
+                                data=csv,
+                                file_name='rsi_percentile_backtest.csv',
+                                mime='text/csv',
+                            )
+
+                        if df_res.empty:
+                            st.warning(f"No signals found for ticker: {ticker_input_bt}")
+                        else:
+                            # --- CALCULATE ACTIVE TRADES STATS ---
+                            # Logic: +1 to count on Entry Day, -1 to count on (Exit Day + 1)
                             # Ensure datetime types
                             df_res['BT_Entry_Date'] = pd.to_datetime(df_res['BT_Entry_Date'])
                             df_res['BT_Exit_Date'] = pd.to_datetime(df_res['BT_Exit_Date'])
@@ -1064,316 +1090,269 @@ def run_rsi_scanner_app(df_global):
                             
                             avg_active = events_df['Active_Count'].mean()
                             max_active = events_df['Active_Count'].max()
-                        else:
-                            avg_active, max_active = 0.0, 0
 
-                        # --- FORMATTING HELPERS ---
-                        def fmt_pct(x):
-                            """Formats 0.10 as 10%, -0.05 as (5%), 10.0 as 1,000%"""
-                            if not isinstance(x, (float, int)) or pd.isna(x): return x
-                            if x < 0: return f"({abs(x):,.0%})"
-                            return f"{x:,.0%}"
+                            # --- FORMATTING HELPERS ---
+                            def fmt_pct(x):
+                                """Formats 0.10 as 10%, -0.05 as (5%), 10.0 as 1,000%"""
+                                if not isinstance(x, (float, int)) or pd.isna(x): return x
+                                if x < 0: return f"({abs(x):,.0%})"
+                                return f"{x:,.0%}"
 
-                        def color_ret(val):
-                            """Light green for positive, light red for negative"""
-                            if not isinstance(val, (float, int)) or pd.isna(val): return ''
-                            color = '#e6f4ea' if val >= 0 else '#fce8e6' 
-                            return f'background-color: {color}; color: #000000;'
+                            def color_ret(val):
+                                """Light green for positive, light red for negative"""
+                                if not isinstance(val, (float, int)) or pd.isna(val): return ''
+                                color = '#e6f4ea' if val >= 0 else '#fce8e6' 
+                                return f'background-color: {color}; color: #000000;'
 
-                        # Layout Columns
-                        res_col1, res_col2 = st.columns([1, 1], gap="large")
+                            # Layout Columns
+                            res_col1, res_col2 = st.columns([1, 1], gap="large")
 
-                        with res_col1:
-                            # --- TABLE 1: TICKER SUMMARY ---
-                            st.subheader("Results by Ticker")
-                            
-                            # Methodology Expander
-                            with st.expander("ℹ️ Strategy Methodology"):
-                                st.markdown("""
-                                **Strategy Execution:**
-                                1. **Signal:** Triggered by RSI Percentile criteria.
-                                2. **Buy:** At **Open** on the trading day *after* the signal (T+1).
-                                3. **Hold:** For the optimal period determined by historical data.
-                                4. **Sell:** At **Close** on the last day of that period.
-                                """)
+                            with res_col1:
+                                # --- TABLE 1: TICKER SUMMARY ---
+                                st.subheader("Results by Ticker")
+                                
+                                # Methodology Expander
+                                with st.expander("ℹ️ Strategy Methodology"):
+                                    st.markdown("""
+                                    **Strategy Execution:**
+                                    1. **Signal:** Triggered by RSI Percentile criteria.
+                                    2. **Buy:** At **Open** on the trading day *after* the signal (T+1).
+                                    3. **Hold:** For the optimal period determined by historical data.
+                                    4. **Sell:** At **Close** on the last day of that period.
+                                    """)
 
-                            # Layout: Ticker Input & Download Button side-by-side
-                            c_filter, c_dl = st.columns([2, 1])
-                            
-                            with c_filter:
-                                # Ticker Input
-                                ticker_input_bt = st.text_input("Ticker Filter (blank=all)", key="rsi_bt_ticker_input_filter").strip().upper()
-                            
-                            with c_dl:
-                                # Spacer to push button down to align with input box
-                                st.write("") 
-                                st.write("") 
-                                # CSV Download
-                                csv = df_res.to_csv(index=False).encode('utf-8')
-                                st.download_button(
-                                    label="Download Signals",
-                                    data=csv,
-                                    file_name='rsi_percentile_backtest.csv',
-                                    mime='text/csv',
+                                # Aggregate
+                                agg_ticker = df_res.groupby('Ticker').agg(
+                                    N_Trades=('BT_Return', 'count'),
+                                    Avg_Hold=('BT_Hold_Days', 'mean'),
+                                    Overall_Return=('BT_Return', 'sum') # Simple sum as per "same position size"
+                                ).reset_index()
+                                
+                                # Sort by return high to low for better visibility
+                                agg_ticker = agg_ticker.sort_values(by="Overall_Return", ascending=False)
+                                
+                                st.dataframe(
+                                    agg_ticker.style
+                                    .format({
+                                        "Avg_Hold": "{:.1f} d", 
+                                        "Overall_Return": fmt_pct
+                                    })
+                                    .map(color_ret, subset=["Overall_Return"]),
+                                    column_config={
+                                        "Ticker": "Ticker",
+                                        "N_Trades": "N",
+                                        "Avg_Hold": "Avg Hold Time",
+                                        "Overall_Return": "Overall Return"
+                                    },
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    height=get_table_height(agg_ticker, 15)
                                 )
 
-                            # Aggregate
-                            agg_ticker = df_res.groupby('Ticker').agg(
-                                N_Trades=('BT_Return', 'count'),
-                                Avg_Hold=('BT_Hold_Days', 'mean'),
-                                Overall_Return=('BT_Return', 'sum') # Simple sum as per "same position size"
-                            ).reset_index()
-                            
-                            # Filter if ticker input provided
-                            if ticker_input_bt:
-                                agg_ticker = agg_ticker[agg_ticker['Ticker'] == ticker_input_bt]
-                            
-                            # Sort by return high to low for better visibility
-                            agg_ticker = agg_ticker.sort_values(by="Overall_Return", ascending=False)
-                            
-                            st.dataframe(
-                                agg_ticker.style
-                                .format({
-                                    "Avg_Hold": "{:.1f} d", 
-                                    "Overall_Return": fmt_pct
-                                })
-                                .map(color_ret, subset=["Overall_Return"]),
-                                column_config={
-                                    "Ticker": "Ticker",
-                                    "N_Trades": "N",
-                                    "Avg_Hold": "Avg Hold Time",
-                                    "Overall_Return": "Overall Return"
-                                },
-                                hide_index=True,
-                                use_container_width=True,
-                                height=get_table_height(agg_ticker, 15)
-                            )
+                            with res_col2:
+                                # --- NEW TABLE: ALL TICKERS SUMMARY ---
+                                st.subheader("Results Summary")
+                                agg_all = pd.DataFrame([{
+                                    "N_Trades": len(df_res),
+                                    "Avg_Hold": df_res['BT_Hold_Days'].mean(),
+                                    "Overall_Return": df_res['BT_Return'].sum(),
+                                    "Avg_Active": avg_active,
+                                    "Max_Active": max_active
+                                }])
+                                st.dataframe(
+                                    agg_all.style
+                                    .format({
+                                        "Avg_Hold": "{:.1f} d", 
+                                        "Overall_Return": fmt_pct,
+                                        "N_Trades": "{:,}",
+                                        "Avg_Active": "{:,.0f}",
+                                        "Max_Active": "{:,.0f}"
+                                    })
+                                    .map(color_ret, subset=["Overall_Return"]),
+                                    column_config={
+                                        "N_Trades": "Total N",
+                                        "Avg_Hold": "Avg Hold Time",
+                                        "Overall_Return": "Overall Return",
+                                        "Avg_Active": "Avg Active",
+                                        "Max_Active": "Max Active"
+                                    },
+                                    hide_index=True,
+                                    use_container_width=True
+                                )
+                                st.caption(f"ℹ️ **Max Active:** Peak number of simultaneous trades. You would need to split capital into **{int(max_active)} units** (approx {100/max_active:.1f}% each) to take every signal without running out of cash.")
+                                st.caption(f"ℹ️ **Avg Active:** Average number of simultaneous trades. On a typical day, you are holding **{avg_active:,.0f} positions**.")
 
-                        with res_col2:
-                            # --- NEW TABLE: ALL TICKERS SUMMARY ---
-                            st.subheader("Results for All Tickers")
-                            agg_all = pd.DataFrame([{
-                                "N_Trades": len(df_res),
-                                "Avg_Hold": df_res['BT_Hold_Days'].mean(),
-                                "Overall_Return": df_res['BT_Return'].sum(),
-                                "Avg_Active": avg_active,
-                                "Max_Active": max_active
-                            }])
-                            st.dataframe(
-                                agg_all.style
-                                .format({
-                                    "Avg_Hold": "{:.1f} d", 
-                                    "Overall_Return": fmt_pct,
-                                    "N_Trades": "{:,}",
-                                    "Avg_Active": "{:,.0f}",
-                                    "Max_Active": "{:,.0f}"
-                                })
-                                .map(color_ret, subset=["Overall_Return"]),
-                                column_config={
-                                    "N_Trades": "Total N",
-                                    "Avg_Hold": "Avg Hold Time",
-                                    "Overall_Return": "Overall Return",
-                                    "Avg_Active": "Avg Active",
-                                    "Max_Active": "Max Active"
-                                },
-                                hide_index=True,
-                                use_container_width=True
-                            )
-                            st.caption(f"ℹ️ **Max Active:** Peak number of simultaneous trades. You would need to split capital into **{int(max_active)} units** (approx {100/max_active:.1f}% each) to take every signal without running out of cash.")
-                            st.caption(f"ℹ️ **Avg Active:** Average number of simultaneous trades. On a typical day, you are holding **{avg_active:,.0f} positions**.")
+                                # --- PRE-CALCULATE BUY & HOLD FOR BENCHMARK REFERENCE ---
+                                def get_bh_return(bm_df, start_d, end_d):
+                                    try:
+                                        # Ensure naive
+                                        start_d = datetime(start_d.year, start_d.month, start_d.day)
+                                        end_d = datetime(end_d.year, end_d.month, end_d.day)
+                                        
+                                        # Handle empty DF
+                                        if bm_df.empty: return 0.0
 
-                            # --- PRE-CALCULATE BUY & HOLD FOR BENCHMARK REFERENCE ---
-                            def get_bh_return(bm_df, start_d, end_d):
-                                try:
-                                    # Ensure naive
-                                    start_d = datetime(start_d.year, start_d.month, start_d.day)
-                                    end_d = datetime(end_d.year, end_d.month, end_d.day)
-                                    
-                                    # Handle empty DF
-                                    if bm_df.empty: return 0.0
+                                        idx_s = bm_df.index.get_indexer([start_d], method='nearest')[0]
+                                        idx_e = bm_df.index.get_indexer([end_d], method='nearest')[0]
+                                        
+                                        p_s = bm_df.iloc[idx_s]['CLOSE']
+                                        p_e = bm_df.iloc[idx_e]['CLOSE']
+                                        
+                                        return (p_e - p_s) / p_s
+                                    except:
+                                        return 0.0
 
-                                    idx_s = bm_df.index.get_indexer([start_d], method='nearest')[0]
-                                    idx_e = bm_df.index.get_indexer([end_d], method='nearest')[0]
-                                    
-                                    p_s = bm_df.iloc[idx_s]['CLOSE']
-                                    p_e = bm_df.iloc[idx_e]['CLOSE']
-                                    
-                                    return (p_e - p_s) / p_s
-                                except:
-                                    return 0.0
+                                spy_bh = get_bh_return(spy_df, bt_start_date, bt_end_date)
+                                qqq_bh = get_bh_return(qqq_df, bt_start_date, bt_end_date)
 
-                            spy_bh = get_bh_return(spy_df, bt_start_date, bt_end_date)
-                            qqq_bh = get_bh_return(qqq_df, bt_start_date, bt_end_date)
+                                # --- PORTFOLIO FEASIBILITY CALCULATOR ---
+                                with st.expander("🧮 Portfolio Feasibility Calculator", expanded=True):
+                                    # Determine Max Benchmark Return for comparison
+                                    max_index_ret = max(spy_bh, qqq_bh)
+                                    
+                                    pf_col1, pf_col2 = st.columns(2)
+                                    with pf_col1:
+                                        pf_amount = st.number_input("Portfolio Size ($)", value=1000000, step=100000, format="%d")
+                                    with pf_col2:
+                                        st.metric("Target Benchmark (Max Index)", f"{max_index_ret:.1%}")
 
-                            # --- PORTFOLIO FEASIBILITY CALCULATOR ---
-                            with st.expander("🧮 Portfolio Feasibility Calculator", expanded=True):
-                                # Determine Max Benchmark Return for comparison
-                                max_index_ret = max(spy_bh, qqq_bh)
-                                
-                                pf_col1, pf_col2 = st.columns(2)
-                                with pf_col1:
-                                    pf_amount = st.number_input("Portfolio Size ($)", value=1000000, step=100000)
-                                with pf_col2:
-                                    st.metric("Target Benchmark (Max Index)", f"{max_index_ret:.1%}")
+                                    strat_total_return_mult = df_res['BT_Return'].sum() # e.g., 368.17 = 36817%
+                                    
+                                    st.markdown("---")
+                                    
+                                    if strat_total_return_mult > 0 and max_active > 0:
+                                        # 1. Max Safe Unit Size (Use full portfolio divided by peak active trades)
+                                        max_safe_unit = pf_amount / max_active
+                                        
+                                        # 2. Projected Profit using that unit size
+                                        projected_profit = max_safe_unit * strat_total_return_mult
+                                        
+                                        # 3. Ending Balance
+                                        ending_balance = pf_amount + projected_profit
+                                        
+                                        # 4. Compare to Benchmark
+                                        bench_balance = pf_amount * (1 + max_index_ret)
+                                        beats_bench = ending_balance > bench_balance
+                                        
+                                        cal_c1, cal_c2 = st.columns(2)
+                                        cal_c1.metric("Max Safe Unit Size", f"${max_safe_unit:,.0f}", help=f"Allocation per trade (${pf_amount:,.0f} / {int(max_active)} max active)")
+                                        
+                                        delta_val = ending_balance - bench_balance
+                                        cal_c2.metric("Ending Acct Bal", f"${ending_balance:,.0f}", delta=f"${delta_val:,.0f} vs Index", help=f"Total Result using Max Safe Unit Size vs Best Index Buy & Hold (${bench_balance:,.0f})")
+                                        
+                                        if beats_bench:
+                                            st.success(f"✅ **Strategy Beats Index!**")
+                                            st.markdown(f"By allocating **${max_safe_unit:,.0f}** per trade (using 100% of capital at peak), you turn **${pf_amount:,.0f}** into **${ending_balance:,.0f}**.")
+                                        else:
+                                            st.error(f"❌ **Strategy Lags Index.**")
+                                            st.markdown(f"Even with max allocation, high cash drag prevents beating the index return of {max_index_ret:.1%}.")
+                                            st.markdown(f"**Tip:** You need to reduce 'Max Active' trades (tighter filters) so you can bet bigger per trade.")
 
-                                strat_total_return_mult = df_res['BT_Return'].sum() # e.g., 368.17 = 36817%
-                                
-                                st.markdown("---")
-                                
-                                if strat_total_return_mult > 0 and max_active > 0:
-                                    # 1. Max Safe Unit Size (Use full portfolio divided by peak active trades)
-                                    max_safe_unit = pf_amount / max_active
-                                    
-                                    # 2. Projected Profit using that unit size
-                                    projected_profit = max_safe_unit * strat_total_return_mult
-                                    
-                                    # 3. Ending Balance
-                                    ending_balance = pf_amount + projected_profit
-                                    
-                                    # 4. Compare to Benchmark
-                                    bench_balance = pf_amount * (1 + max_index_ret)
-                                    beats_bench = ending_balance > bench_balance
-                                    
-                                    cal_c1, cal_c2 = st.columns(2)
-                                    cal_c1.metric("Max Safe Unit Size", f"${max_safe_unit:,.0f}", help=f"Allocation per trade (${pf_amount:,.0f} / {int(max_active)} max active)")
-                                    
-                                    delta_val = ending_balance - bench_balance
-                                    cal_c2.metric("Ending Acct Bal", f"${ending_balance:,.0f}", delta=f"${delta_val:,.0f} vs Index", help=f"Total Result using Max Safe Unit Size vs Best Index Buy & Hold (${bench_balance:,.0f})")
-                                    
-                                    if beats_bench:
-                                        st.success(f"✅ **Strategy Beats Index!**")
-                                        st.markdown(f"By allocating **${max_safe_unit:,.0f}** per trade (using 100% of capital at peak), you turn **${pf_amount:,.0f}** into **${ending_balance:,.0f}**.")
                                     else:
-                                        st.error(f"❌ **Strategy Lags Index.**")
-                                        st.markdown(f"Even with max allocation, high cash drag prevents beating the index return of {max_index_ret:.1%}.")
-                                        st.markdown(f"**Tip:** You need to reduce 'Max Active' trades (tighter filters) so you can bet bigger per trade.")
+                                        if strat_total_return_mult <= 0:
+                                            st.warning("Strategy has negative total return.")
+                                        else:
+                                            st.warning("No active trades detected.")
 
-                                else:
-                                    if strat_total_return_mult <= 0:
-                                        st.warning("Strategy has negative total return.")
-                                    else:
-                                        st.warning("No active trades detected.")
-
-                            # --- TABLE 2: BENCHMARK COMPARISON ---
-                            st.subheader("Annual Benchmark Comparison")
-                            
-                            with st.expander("ℹ️ Methodology"):
-                                st.markdown("""
-                                **"Apples-to-Apples" Comparison:**
-                                * **Same Dates:** The Index (SPY/QQQ) is "bought" on the exact same Entry Date and "sold" on the exact same Exit Date as the strategy signal.
-                                * **Same Position Size:** Returns are calculated assuming an equal dollar amount allocated to every trade.
-                                * **No Look-Ahead:** The index trade uses the Strategy's optimal holding period (determined by historical data prior to the signal).
-                                """)
-
-                            # Add Year Column based on EXIT date
-                            df_res['Exit_Year'] = pd.to_datetime(df_res['BT_Exit_Date']).dt.year
-                            df_res['Start_Year'] = pd.to_datetime(df_res['BT_Entry_Date']).dt.year
-                            
-                            # Determine years from user selection
-                            start_yr = bt_start_date.year
-                            end_yr = bt_end_date.year
-                            years = range(start_yr, end_yr + 1)
-                            
-                            bm_rows = []
-                            
-                            # Calculate Annual Rows
-                            for y in years:
-                                # Trades ending in Year y
-                                ended_in_y = df_res[df_res['Exit_Year'] == y]
-                                started_in_y = df_res[df_res['Start_Year'] == y]
+                                # --- TABLE 2: BENCHMARK COMPARISON ---
+                                st.subheader("Annual Benchmark Comparison")
                                 
-                                # If no trades ended this year, we still show the row with 0s? 
-                                # Or skip? Usually nicer to show 0s.
-                                strat_ret = ended_in_y['BT_Return'].sum()
-                                spy_ret = ended_in_y['SPY_Ret'].sum()
-                                qqq_ret = ended_in_y['QQQ_Ret'].sum()
+                                with st.expander("ℹ️ Methodology"):
+                                    st.markdown("""
+                                    **"Apples-to-Apples" Comparison:**
+                                    * **Same Dates:** The Index (SPY/QQQ) is "bought" on the exact same Entry Date and "sold" on the exact same Exit Date as the strategy signal.
+                                    * **Same Position Size:** Returns are calculated assuming an equal dollar amount allocated to every trade.
+                                    * **No Look-Ahead:** The index trade uses the Strategy's optimal holding period (determined by historical data prior to the signal).
+                                    """)
+
+                                # Add Year Column based on EXIT date
+                                df_res['Exit_Year'] = pd.to_datetime(df_res['BT_Exit_Date']).dt.year
+                                df_res['Start_Year'] = pd.to_datetime(df_res['BT_Entry_Date']).dt.year
+                                
+                                # Determine years from user selection
+                                start_yr = bt_start_date.year
+                                end_yr = bt_end_date.year
+                                years = range(start_yr, end_yr + 1)
+                                
+                                bm_rows = []
+                                
+                                # Calculate Annual Rows
+                                for y in years:
+                                    # Trades ending in Year y
+                                    ended_in_y = df_res[df_res['Exit_Year'] == y]
+                                    started_in_y = df_res[df_res['Start_Year'] == y]
+                                    
+                                    # If no trades ended this year, we still show the row with 0s? 
+                                    # Or skip? Usually nicer to show 0s.
+                                    strat_ret = ended_in_y['BT_Return'].sum()
+                                    spy_ret = ended_in_y['SPY_Ret'].sum()
+                                    qqq_ret = ended_in_y['QQQ_Ret'].sum()
+                                    
+                                    bm_rows.append({
+                                        "Year": str(y),
+                                        "Strategy Return": strat_ret,
+                                        "SPY Return": spy_ret,
+                                        "QQQ Return": qqq_ret,
+                                        "N_Start": len(started_in_y),
+                                        "N_End": len(ended_in_y)
+                                    })
+                                
+                                # Calculate Overall Row (Last)
+                                ov_strat = df_res['BT_Return'].sum()
+                                ov_spy = df_res['SPY_Ret'].sum()
+                                ov_qqq = df_res['QQQ_Ret'].sum()
+                                ov_n_start = len(df_res)
+                                ov_n_end = len(df_res)
                                 
                                 bm_rows.append({
-                                    "Year": str(y),
-                                    "Strategy Return": strat_ret,
-                                    "SPY Return": spy_ret,
-                                    "QQQ Return": qqq_ret,
-                                    "N_Start": len(started_in_y),
-                                    "N_End": len(ended_in_y)
+                                    "Year": "Overall",
+                                    "Strategy Return": ov_strat,
+                                    "SPY Return": ov_spy,
+                                    "QQQ Return": ov_qqq,
+                                    "N_Start": ov_n_start,
+                                    "N_End": ov_n_end
                                 })
-                            
-                            # Calculate Overall Row (Last)
-                            ov_strat = df_res['BT_Return'].sum()
-                            ov_spy = df_res['SPY_Ret'].sum()
-                            ov_qqq = df_res['QQQ_Ret'].sum()
-                            ov_n_start = len(df_res)
-                            ov_n_end = len(df_res)
-                            
-                            bm_rows.append({
-                                "Year": "Overall",
-                                "Strategy Return": ov_strat,
-                                "SPY Return": ov_spy,
-                                "QQQ Return": ov_qqq,
-                                "N_Start": ov_n_start,
-                                "N_End": ov_n_end
-                            })
 
-                            bm_df = pd.DataFrame(bm_rows)
-                            
-                            def highlight_bm(row):
-                                styles = [''] * len(row)
-                                if row['Year'] == "Overall":
-                                    # Only bold the Year and N_End, let color_ret handle the numbers
-                                    return ['font-weight: bold; background-color: #f0f2f6; border-top: 2px solid #ccc'] * len(row)
-                                return styles
+                                bm_df = pd.DataFrame(bm_rows)
+                                
+                                def highlight_bm(row):
+                                    styles = [''] * len(row)
+                                    if row['Year'] == "Overall":
+                                        # Only bold the Year and N_End, let color_ret handle the numbers
+                                        return ['font-weight: bold; background-color: #f0f2f6; border-top: 2px solid #ccc'] * len(row)
+                                    return styles
 
-                            st.dataframe(
-                                bm_df.style
-                                .apply(highlight_bm, axis=1)
-                                .format({
-                                    "Strategy Return": fmt_pct,
-                                    "SPY Return": fmt_pct,
-                                    "QQQ Return": fmt_pct,
-                                    "N_Start": "{:,}",
-                                    "N_End": "{:,}"
-                                }),
-                                # REMOVED color_ret map per instruction
-                                hide_index=True,
-                                use_container_width=True,
-                                column_config={
-                                    "N_Start": st.column_config.TextColumn("N Start"),
-                                    "N_End": st.column_config.TextColumn("N End")
-                                }
-                            )
+                                st.dataframe(
+                                    bm_df.style
+                                    .apply(highlight_bm, axis=1)
+                                    .format({
+                                        "Strategy Return": fmt_pct,
+                                        "SPY Return": fmt_pct,
+                                        "QQQ Return": fmt_pct,
+                                        "N_Start": "{:,}",
+                                        "N_End": "{:,}"
+                                    }),
+                                    # REMOVED color_ret map per instruction (a)
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    column_config={
+                                        "N_Start": st.column_config.TextColumn("N Start"),
+                                        "N_End": st.column_config.TextColumn("N End")
+                                    }
+                                )
 
-                            # --- BUY & HOLD SECTION ---
-                            st.markdown("##### 🏛️ Passive Buy & Hold (Full Period)")
-                            bh_cols = st.columns(2)
-                            
-                            def get_bh_return(bm_df, start_d, end_d):
-                                try:
-                                    # Ensure naive
-                                    start_d = datetime(start_d.year, start_d.month, start_d.day)
-                                    end_d = datetime(end_d.year, end_d.month, end_d.day)
-                                    
-                                    # Handle empty DF
-                                    if bm_df.empty: return 0.0
+                                # --- BUY & HOLD SECTION ---
+                                st.markdown("##### 🏛️ Passive Buy & Hold (Full Period)")
+                                bh_cols = st.columns(2)
+                                
+                                # (Calculated above for feasibility calc, reused here)
+                                bh_cols[0].metric("SPY Buy & Hold", f"{spy_bh:.1%}")
+                                bh_cols[1].metric("QQQ Buy & Hold", f"{qqq_bh:.1%}")
+                                
+                                st.caption(f"Methodology: Assumes a single buy on {bt_start_date.strftime('%b %d, %Y')} and sell on {bt_end_date.strftime('%b %d, %Y')}.")
 
-                                    idx_s = bm_df.index.get_indexer([start_d], method='nearest')[0]
-                                    idx_e = bm_df.index.get_indexer([end_d], method='nearest')[0]
-                                    
-                                    p_s = bm_df.iloc[idx_s]['CLOSE']
-                                    p_e = bm_df.iloc[idx_e]['CLOSE']
-                                    
-                                    return (p_e - p_s) / p_s
-                                except:
-                                    return 0.0
-
-                            spy_bh = get_bh_return(spy_df, bt_start_date, bt_end_date)
-                            qqq_bh = get_bh_return(qqq_df, bt_start_date, bt_end_date)
-                            
-                            bh_cols[0].metric("SPY Buy & Hold", f"{spy_bh:.1%}")
-                            bh_cols[1].metric("QQQ Buy & Hold", f"{qqq_bh:.1%}")
-                            
-                            st.caption(f"Methodology: Assumes a single buy on {bt_start_date.strftime('%b %d, %Y')} and sell on {bt_end_date.strftime('%b %d, %Y')}.")
-
-                        # Invisible Buffer
-                        st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
+                            # Invisible Buffer
+                            st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
                         
                     elif 'bt_results_df' in st.session_state:
                         st.warning("No signals found matching criteria in the backtest period.")
