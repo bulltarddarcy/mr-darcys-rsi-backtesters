@@ -1358,6 +1358,8 @@ def run_rsi_scanner_app(df_global):
                     elif 'bt_results_df' in st.session_state:
                         st.warning("No signals found matching criteria in the backtest period.")
 
+            except Exception as e: st.error(f"Analysis failed: {e}")
+
     # with tab_bot: (HIDDEN)
     if False:
         st.markdown('<div class="light-note" style="margin-bottom: 15px;">ℹ️ If this is buggy, just go back to the RSI Divergences tab and back here and it will work.</div>', unsafe_allow_html=True)
