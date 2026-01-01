@@ -415,37 +415,74 @@ def fetch_yahoo_data(ticker):
 
 @st.cache_data(ttl=86400)
 def fetch_benchmark_data():
-    """Fetches SPY and QQQ data for benchmarking."""
-    try:
-        data = yf.download("SPY QQQ", period="10y", group_by='ticker', auto_adjust=True, progress=False)
-        
-        # Handle cases where yfinance structure varies
-        if isinstance(data.columns, pd.MultiIndex):
-            # If multi-index, extract levels
-            try:
-                spy_df = data['SPY'].reset_index()
-                qqq_df = data['QQQ'].reset_index()
-            except KeyError:
-                # Sometimes yfinance might just return single DF if one fails or only one requested, but we requested two
-                return pd.DataFrame(), pd.DataFrame()
-        else:
-            return pd.DataFrame(), pd.DataFrame() # Should be multi-index for 2 tickers
-        
-        # Standardize
-        for d in [spy_df, qqq_df]:
-            d.columns = [c.upper() for c in d.columns] # Date -> DATE, Close -> CLOSE
-            d_col = next((c for c in d.columns if "DATE" in c), "DATE")
-            d[d_col] = pd.to_datetime(d[d_col])
-            # Explicitly strip timezone in fetch to match local parquet data
-            if d[d_col].dt.tz is not None:
-                d[d_col] = d[d_col].dt.tz_localize(None)
-            d.set_index(d_col, inplace=True)
-            d.sort_index(inplace=True)
+    """Fetches SPY and QQQ data for benchmarking. Priority: PARQUET_MACRO -> yfinance"""
+    spy_df = pd.DataFrame()
+    qqq_df = pd.DataFrame()
+
+    # 1. Try Parquet from SECRETS if available
+    macro_url = st.secrets.get("PARQUET_MACRO")
+    if macro_url:
+        try:
+            buffer = get_gdrive_binary_data(macro_url)
+            if buffer:
+                macro_df = pd.read_parquet(buffer, engine='pyarrow')
+                # Clean columns: Strip, upper, remove special chars
+                macro_df.columns = [c.strip().replace(' ', '').replace('-', '').upper() for c in macro_df.columns]
+                
+                # Identify key columns
+                t_col = next((c for c in macro_df.columns if c in ['TICKER', 'SYMBOL']), None)
+                d_col = next((c for c in macro_df.columns if 'DATE' in c), None)
+                # Prefer normal Close, fallback to Adjusted if needed, exclude Weekly
+                c_col = next((c for c in macro_df.columns if 'CLOSE' in c and 'W_' not in c), None)
+
+                if t_col and d_col and c_col:
+                    # Ensure Date is datetime and timezone-naive
+                    macro_df[d_col] = pd.to_datetime(macro_df[d_col])
+                    if macro_df[d_col].dt.tz is not None:
+                        macro_df[d_col] = macro_df[d_col].dt.tz_localize(None)
+                    
+                    # Process SPY
+                    spy_raw = macro_df[macro_df[t_col] == 'SPY'].copy()
+                    if not spy_raw.empty:
+                        spy_df = spy_raw[[d_col, c_col]].rename(columns={c_col: 'CLOSE'}).set_index(d_col).sort_index()
+                    
+                    # Process QQQ
+                    qqq_raw = macro_df[macro_df[t_col] == 'QQQ'].copy()
+                    if not qqq_raw.empty:
+                        qqq_df = qqq_raw[[d_col, c_col]].rename(columns={c_col: 'CLOSE'}).set_index(d_col).sort_index()
+        except Exception as e:
+            print(f"Macro Parquet Load Error: {e}")
+
+    # 2. Fallback to yfinance if parquet failed or data missing
+    if spy_df.empty or qqq_df.empty:
+        try:
+            data = yf.download("SPY QQQ", period="10y", group_by='ticker', auto_adjust=True, progress=False)
             
-        return spy_df, qqq_df
-    except Exception as e:
-        print(f"Benchmark error: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+            if isinstance(data.columns, pd.MultiIndex):
+                try:
+                    # yfinance might return different structures depending on version
+                    if 'SPY' in data.columns.levels[0]:
+                        spy_df = data['SPY'].reset_index()
+                    if 'QQQ' in data.columns.levels[0]:
+                        qqq_df = data['QQQ'].reset_index()
+                except KeyError:
+                    pass
+            
+            # Standardize fallback data
+            for d in [spy_df, qqq_df]:
+                if not d.empty:
+                    d.columns = [c.upper() for c in d.columns]
+                    d_col = next((c for c in d.columns if "DATE" in c), "DATE")
+                    d[d_col] = pd.to_datetime(d[d_col])
+                    if d[d_col].dt.tz is not None:
+                        d[d_col] = d[d_col].dt.tz_localize(None)
+                    d.set_index(d_col, inplace=True)
+                    d.sort_index(inplace=True)
+                    
+        except Exception as e:
+            print(f"Benchmark yfinance error: {e}")
+
+    return spy_df, qqq_df
 
 def prepare_data(df):
     # Standardize column names (removes spaces, dashes, converts to UPPER)
@@ -800,10 +837,6 @@ def find_rsi_percentile_signals(df, ticker, pct_low=0.10, pct_high=0.90, min_n=1
                 # So Entry: i+1 (Open). Exit: i+1+p_val (Close).
                 
                 entry_idx = i + 1
-                exit_idx = i + p_val # Stats use close[i+p] - close[i]. 
-                # We want Open[i+1] to Close[i+p]? That shortens the hold.
-                # User instructions: "hold for the trading days chosen".
-                # If "chosen" is 30 days. We buy T+1. We hold for 30 days. We sell T+1+30.
                 exit_idx = i + p_val + 1
 
                 if exit_idx < len(hist_df):
@@ -871,11 +904,13 @@ def run_rsi_scanner_app(df_global):
     # Helper to map dropdown text to function codes
     OPT_MAP = {"Profit Factor": "PF", "SQN": "SQN"}
 
-    tab_div, tab_pct, tab_bot, tab_pct_bt = st.tabs(["📉 Divergences", "🔢 Percentiles", "🤖 RSI Backtester", "📊 Percentile Backtester"])
+    # --- TABS SETUP (MODIFIED: Only Percentile Backtester Visible) ---
+    # tab_div, tab_pct, tab_bot, tab_pct_bt = st.tabs(["📉 Divergences", "🔢 Percentiles", "🤖 RSI Backtester", "📊 Percentile Backtester"])
+    tab_pct_bt, = st.tabs(["📊 Percentile Backtester"])
 
     with tab_pct_bt:
         st.markdown("### 📊 Strategy Backtester")
-        st.caption("Strategy: Buy at Open (Day T+1) → Hold for Optimal Period → Sell at Close (Day T+Period).")
+        # REMOVED CAPTION HERE per instruction (b)
         
         # --- INPUTS (Mirrors Percentiles) ---
         data_option_bt = st.pills("Dataset", options=options, selection_mode="single", default=options[0] if options else None, label_visibility="collapsed", key="rsi_bt_pills_new")
@@ -1007,17 +1042,35 @@ def run_rsi_scanner_app(df_global):
                                 # --- TABLE 1: TICKER SUMMARY ---
                                 st.subheader("Results by Ticker")
                                 
-                                # --- CSV DOWNLOAD (Moved Up) ---
-                                csv = df_res.to_csv(index=False).encode('utf-8')
-                                st.download_button(
-                                    label="Download Signal CSV",
-                                    data=csv,
-                                    file_name='rsi_percentile_backtest.csv',
-                                    mime='text/csv',
-                                )
+                                # (c) Methodology Expander
+                                with st.expander("ℹ️ Strategy Methodology"):
+                                    st.markdown("""
+                                    **Strategy Execution:**
+                                    1. **Signal:** Triggered by RSI Percentile criteria.
+                                    2. **Buy:** At **Open** on the trading day *after* the signal (T+1).
+                                    3. **Hold:** For the optimal period determined by historical data.
+                                    4. **Sell:** At **Close** on the last day of that period.
+                                    """)
+
+                                # (d) Layout: Ticker Input & Download Button side-by-side
+                                c_filter, c_dl = st.columns([2, 1])
                                 
-                                # Ticker Input moved here
-                                ticker_input_bt = st.text_input("Ticker Filter (Leave empty for all)", key="rsi_bt_ticker_input_filter").strip().upper()
+                                with c_filter:
+                                    # Ticker Input
+                                    ticker_input_bt = st.text_input("Ticker Filter (blank=all)", key="rsi_bt_ticker_input_filter").strip().upper()
+                                
+                                with c_dl:
+                                    # Spacer to push button down to align with input box
+                                    st.write("") 
+                                    st.write("") 
+                                    # CSV Download
+                                    csv = df_res.to_csv(index=False).encode('utf-8')
+                                    st.download_button(
+                                        label="Download CSV",
+                                        data=csv,
+                                        file_name='rsi_percentile_backtest.csv',
+                                        mime='text/csv',
+                                    )
 
                                 # Aggregate
                                 agg_ticker = df_res.groupby('Ticker').agg(
@@ -1147,8 +1200,8 @@ def run_rsi_scanner_app(df_global):
                                         "SPY Return": fmt_pct,
                                         "QQQ Return": fmt_pct,
                                         "N_End": "{:,}"
-                                    })
-                                    .map(color_ret, subset=["Strategy Return", "SPY Return", "QQQ Return"]),
+                                    }),
+                                    # REMOVED color_ret map per instruction (a)
                                     hide_index=True,
                                     use_container_width=True,
                                     column_config={
@@ -1166,6 +1219,9 @@ def run_rsi_scanner_app(df_global):
                                         start_d = datetime(start_d.year, start_d.month, start_d.day)
                                         end_d = datetime(end_d.year, end_d.month, end_d.day)
                                         
+                                        # Handle empty DF
+                                        if bm_df.empty: return 0.0
+
                                         idx_s = bm_df.index.get_indexer([start_d], method='nearest')[0]
                                         idx_e = bm_df.index.get_indexer([end_d], method='nearest')[0]
                                         
@@ -1192,7 +1248,8 @@ def run_rsi_scanner_app(df_global):
 
             except Exception as e: st.error(f"Analysis failed: {e}")
 
-    with tab_bot:
+    # with tab_bot: (HIDDEN)
+    if False:
         st.markdown('<div class="light-note" style="margin-bottom: 15px;">ℹ️ If this is buggy, just go back to the RSI Divergences tab and back here and it will work.</div>', unsafe_allow_html=True)
         
         with st.expander("ℹ️ Page Notes: Backtester Logic"):
@@ -1345,7 +1402,8 @@ def run_rsi_scanner_app(df_global):
 
                         st.markdown("<br><br><br>", unsafe_allow_html=True)
 
-    with tab_div:
+    # with tab_div: (HIDDEN)
+    if False:
         data_option_div = st.pills("Dataset", options=options, selection_mode="single", default=options[0] if options else None, label_visibility="collapsed", key="rsi_div_pills")
         
         # Use session state for display text to allow rendering before input widget
@@ -1511,7 +1569,8 @@ def run_rsi_scanner_app(df_global):
                     st.error(f"Failed to load dataset: {data_option_div}")
             except Exception as e: st.error(f"Analysis failed: {e}")
 
-    with tab_pct:
+    # with tab_pct: (HIDDEN)
+    if False:
         data_option_pct = st.pills("Dataset", options=options, selection_mode="single", default=options[0] if options else None, label_visibility="collapsed", key="rsi_pct_pills")
         
         with st.expander("ℹ️ Page Notes: Percentile Strategy Logic"):
