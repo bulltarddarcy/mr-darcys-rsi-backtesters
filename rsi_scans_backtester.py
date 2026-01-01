@@ -1207,50 +1207,51 @@ def run_rsi_scanner_app(df_global):
 
                                 # --- PORTFOLIO FEASIBILITY CALCULATOR ---
                                 with st.expander("🧮 Portfolio Feasibility Calculator", expanded=True):
-                                    # Determine Max Benchmark Return for comparison
-                                    max_index_ret = max(spy_bh, qqq_bh)
-                                    
                                     pf_col1, pf_col2 = st.columns(2)
                                     with pf_col1:
                                         pf_amount = st.number_input("Portfolio Size ($)", value=1000000, step=100000, format="%d")
                                     with pf_col2:
-                                        st.metric("Target Benchmark (Max Index)", f"{max_index_ret:.1%}")
+                                        # Dropdown for Benchmark
+                                        bench_choice = st.selectbox("Target Benchmark", ["SPY", "QQQ"])
+                                        # Select appropriate return
+                                        selected_bm_ret = spy_bh if bench_choice == "SPY" else qqq_bh
+                                        st.caption(f"Target to Beat: **{selected_bm_ret:.1%}** ({bench_choice} Buy & Hold)")
 
                                     strat_total_return_mult = df_res['BT_Return'].sum() # e.g., 368.17 = 36817%
                                     
                                     st.markdown("---")
                                     
                                     if strat_total_return_mult > 0 and max_active > 0:
-                                        # 1. Max Safe Unit Size (Use full portfolio divided by peak active trades)
-                                        max_safe_unit = pf_amount / max_active
+                                        # 1. Calculate Target Profit (Matching the Index)
+                                        target_profit_dollars = pf_amount * selected_bm_ret
                                         
-                                        # 2. Projected Profit using that unit size
-                                        projected_profit = max_safe_unit * strat_total_return_mult
+                                        # 2. Calculate Required Unit Size to hit that target
+                                        # Equation: Unit_Size * Strategy_Mult = Target_Profit
+                                        req_unit_size = target_profit_dollars / strat_total_return_mult
                                         
-                                        # 3. Ending Balance
-                                        ending_balance = pf_amount + projected_profit
+                                        # 3. Calculate Peak Capital Usage
+                                        req_peak_capital = req_unit_size * max_active
                                         
-                                        # 4. Compare to Benchmark
-                                        bench_balance = pf_amount * (1 + max_index_ret)
-                                        beats_bench = ending_balance > bench_balance
+                                        # 4. Utilization
+                                        utilization = req_peak_capital / pf_amount
                                         
                                         cal_c1, cal_c2 = st.columns(2)
-                                        cal_c1.metric("Max Safe Unit Size", f"${max_safe_unit:,.0f}", help=f"Allocation per trade (${pf_amount:,.0f} / {int(max_active)} max active)")
+                                        cal_c1.metric("Required Unit Size", f"${req_unit_size:,.0f}", help="Bet size needed per trade to generate enough profit to match the benchmark")
+                                        cal_c2.metric("Peak Capital Utilization", f"{utilization:.1%}", help=f"You need ${req_peak_capital:,.0f} ({utilization:.1%}) of your portfolio to execute this. The rest sits in cash.")
                                         
-                                        delta_val = ending_balance - bench_balance
-                                        cal_c2.metric("Ending Acct Bal", f"${ending_balance:,.0f}", delta=f"${delta_val:,.0f} vs Index", help=f"Total Result using Max Safe Unit Size vs Best Index Buy & Hold (${bench_balance:,.0f})")
-                                        
-                                        if beats_bench:
-                                            st.success(f"✅ **Strategy Beats Index!**")
-                                            st.markdown(f"By allocating **${max_safe_unit:,.0f}** per trade (using 100% of capital at peak), you turn **${pf_amount:,.0f}** into **${ending_balance:,.0f}**.")
+                                        if req_peak_capital > pf_amount:
+                                            shortfall = req_peak_capital - pf_amount
+                                            st.error(f"❌ **Busted (Liquidity Crisis)**")
+                                            st.markdown(f"To match {bench_choice}'s return, you need to bet **${req_unit_size:,.0f}** per trade.")
+                                            st.markdown(f"However, with **{int(max_active)} active trades** at peak, you would need **${req_peak_capital:,.0f}**, which exceeds your portfolio.")
                                         else:
-                                            st.error(f"❌ **Strategy Lags Index.**")
-                                            st.markdown(f"Even with max allocation, high cash drag prevents beating the index return of {max_index_ret:.1%}.")
-                                            st.markdown(f"**Tip:** You need to reduce 'Max Active' trades (tighter filters) so you can bet bigger per trade.")
+                                            st.success(f"✅ **Feasible & Efficient**")
+                                            st.markdown(f"You can match the {bench_choice} return by allocating just **{utilization:.1%}** of your capital.")
+                                            st.markdown(f"**The Advantage:** You achieve the same return as the index, but **{(1-utilization):.1%}** of your cash (${(pf_amount - req_peak_capital):,.0f}) remains risk-free in the bank.")
 
                                     else:
                                         if strat_total_return_mult <= 0:
-                                            st.warning("Strategy has negative total return.")
+                                            st.warning("Strategy has negative total return. Cannot beat a positive benchmark.")
                                         else:
                                             st.warning("No active trades detected.")
 
@@ -1356,8 +1357,6 @@ def run_rsi_scanner_app(df_global):
                         
                     elif 'bt_results_df' in st.session_state:
                         st.warning("No signals found matching criteria in the backtest period.")
-
-            except Exception as e: st.error(f"Analysis failed: {e}")
 
     # with tab_bot: (HIDDEN)
     if False:
