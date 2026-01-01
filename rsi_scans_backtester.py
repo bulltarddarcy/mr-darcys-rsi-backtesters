@@ -1090,6 +1090,7 @@ def run_rsi_scanner_app(df_global):
                             
                             avg_active = events_df['Active_Count'].mean()
                             max_active = events_df['Active_Count'].max()
+                            if max_active == 0: max_active = 1 # Avoid div by zero
 
                             # --- FORMATTING HELPERS ---
                             def fmt_pct(x):
@@ -1120,29 +1121,50 @@ def run_rsi_scanner_app(df_global):
                                     3. **Hold:** For the optimal period determined by historical data.
                                     4. **Sell:** At **Close** on the last day of that period.
                                     """)
-
-                                # Aggregate
-                                agg_ticker = df_res.groupby('Ticker').agg(
-                                    N_Trades=('BT_Return', 'count'),
-                                    Avg_Hold=('BT_Hold_Days', 'mean'),
-                                    Overall_Return=('BT_Return', 'sum') # Simple sum as per "same position size"
-                                ).reset_index()
+                                
+                                # Calculate Ticker-Specific Max Active & ROI
+                                # Need to do this carefully. Groupby alone doesn't give daily active timeline.
+                                # For "Results by Ticker", we want Effective ROI = Sum(Ret) / Ticker_Max_Active
+                                
+                                results_by_ticker = []
+                                for t, t_df in df_res.groupby('Ticker'):
+                                    # Calculate Max Active for THIS ticker
+                                    t_entries = t_df['BT_Entry_Date'].value_counts()
+                                    t_exits = (t_df['BT_Exit_Date'] + timedelta(days=1)).value_counts()
+                                    t_tl = pd.DataFrame({'E': t_entries, 'X': t_exits}).fillna(0).sort_index()
+                                    # Don't need full reindex for just max, cumsum works on sorted unique dates
+                                    t_tl['Net'] = t_tl['E'] - t_tl['X']
+                                    t_active = t_tl['Net'].cumsum().max()
+                                    if t_active <= 0: t_active = 1
+                                    
+                                    sum_ret = t_df['BT_Return'].sum()
+                                    eff_roi = sum_ret / t_active
+                                    
+                                    results_by_ticker.append({
+                                        'Ticker': t,
+                                        'N_Trades': len(t_df),
+                                        'Avg_Hold': t_df['BT_Hold_Days'].mean(),
+                                        'Effective_ROI': eff_roi
+                                    })
+                                
+                                agg_ticker = pd.DataFrame(results_by_ticker)
                                 
                                 # Sort by return high to low for better visibility
-                                agg_ticker = agg_ticker.sort_values(by="Overall_Return", ascending=False)
+                                if not agg_ticker.empty:
+                                    agg_ticker = agg_ticker.sort_values(by="Effective_ROI", ascending=False)
                                 
                                 st.dataframe(
                                     agg_ticker.style
                                     .format({
                                         "Avg_Hold": "{:.1f} d", 
-                                        "Overall_Return": fmt_pct
+                                        "Effective_ROI": fmt_pct
                                     })
-                                    .map(color_ret, subset=["Overall_Return"]),
+                                    .map(color_ret, subset=["Effective_ROI"]),
                                     column_config={
                                         "Ticker": "Ticker",
                                         "N_Trades": "N",
                                         "Avg_Hold": "Avg Hold Time",
-                                        "Overall_Return": "Overall Return"
+                                        "Effective_ROI": st.column_config.TextColumn("Effective ROI", help="Total Return / Max Active Trades")
                                     },
                                     hide_index=True,
                                     use_container_width=True,
@@ -1284,20 +1306,6 @@ def run_rsi_scanner_app(df_global):
                                 
                                 bm_rows = []
                                 
-                                # Helper to get Max Active for a specific subset
-                                def get_max_active_for_subset(sub_df):
-                                    if sub_df.empty: return 0
-                                    e_counts = sub_df['BT_Entry_Date'].value_counts()
-                                    x_counts = (sub_df['BT_Exit_Date'] + timedelta(days=1)).value_counts()
-                                    tl = pd.DataFrame({'Entries': e_counts, 'Exits': x_counts}).fillna(0).sort_index()
-                                    if tl.empty: return 0
-                                    # Fill gaps
-                                    idx = pd.date_range(tl.index.min(), tl.index.max())
-                                    tl = tl.reindex(idx).fillna(0)
-                                    tl['Net'] = tl['Entries'] - tl['Exits']
-                                    tl['Active'] = tl['Net'].cumsum()
-                                    return tl['Active'].max()
-
                                 # Calculate Annual Rows
                                 for y in years:
                                     # Trades ending in Year y (Realized P&L)
@@ -1318,14 +1326,17 @@ def run_rsi_scanner_app(df_global):
                                             max_active_y = events_y['Active_Count'].max()
                                     
                                     # Effective ROI = Total Return / Max Active Units
-                                    # This represents "Profit / Peak Capital Deployed"
                                     eff_roi = strat_ret_sum / max_active_y if max_active_y > 0 else 0.0
+                                    
+                                    # Adjust Benchmark Returns to Effective ROI as well
+                                    eff_spy = spy_ret / max_active_y if max_active_y > 0 else 0.0
+                                    eff_qqq = qqq_ret / max_active_y if max_active_y > 0 else 0.0
                                     
                                     bm_rows.append({
                                         "Year": str(y),
                                         "Effective ROI": eff_roi,
-                                        "SPY Return": spy_ret,
-                                        "QQQ Return": qqq_ret,
+                                        "SPY Return": eff_spy,
+                                        "QQQ Return": eff_qqq,
                                         "N_Start": len(started_in_y),
                                         "N_End": len(ended_in_y),
                                         "Max_Active": max_active_y
@@ -1333,17 +1344,19 @@ def run_rsi_scanner_app(df_global):
                                 
                                 # Calculate Overall Row (Last)
                                 ov_strat_sum = df_res['BT_Return'].sum()
-                                ov_spy = df_res['SPY_Ret'].sum()
-                                ov_qqq = df_res['QQQ_Ret'].sum()
+                                ov_spy_sum = df_res['SPY_Ret'].sum()
+                                ov_qqq_sum = df_res['QQQ_Ret'].sum()
                                 
                                 # Overall Max Active was calculated earlier as 'max_active' in the Results Summary section
                                 ov_eff_roi = ov_strat_sum / max_active if max_active > 0 else 0.0
+                                ov_eff_spy = ov_spy_sum / max_active if max_active > 0 else 0.0
+                                ov_eff_qqq = ov_qqq_sum / max_active if max_active > 0 else 0.0
                                 
                                 bm_rows.append({
                                     "Year": "Overall",
                                     "Effective ROI": ov_eff_roi,
-                                    "SPY Return": ov_spy,
-                                    "QQQ Return": ov_qqq,
+                                    "SPY Return": ov_eff_spy,
+                                    "QQQ Return": ov_eff_qqq,
                                     "N_Start": len(df_res),
                                     "N_End": len(df_res),
                                     "Max_Active": max_active
@@ -1374,7 +1387,7 @@ def run_rsi_scanner_app(df_global):
                                         "N_Start": st.column_config.TextColumn("N Start"),
                                         "N_End": st.column_config.TextColumn("N End"),
                                         "Max_Active": st.column_config.TextColumn("Max Active", help="Peak number of simultaneous trades in this period"),
-                                        "Effective ROI": st.column_config.TextColumn("Effective ROI", help="Strategy Profit / Peak Capital Required. This is the return on the cash you actually needed to trade the system.")
+                                        "Effective ROI": st.column_config.TextColumn("Effective ROI", help="Total Strategy Return / Max Active Trades. Represents return on capital required.")
                                     }
                                 )
 
@@ -1395,213 +1408,3 @@ def run_rsi_scanner_app(df_global):
                         st.warning("No signals found matching criteria in the backtest period.")
 
             except Exception as e: st.error(f"Analysis failed: {e}")
-
-    # with tab_bot: (HIDDEN)
-    if False:
-        st.markdown('<div class="light-note" style="margin-bottom: 15px;">ℹ️ If this is buggy, just go back to the RSI Divergences tab and back here and it will work.</div>', unsafe_allow_html=True)
-        
-        with st.expander("ℹ️ Page Notes: Backtester Logic"):
-            st.markdown("""
-            * **Data Source**: Unlike the Divergences and Percentile tabs (which use limited ~10yr history files), this tab pulls **Complete Price History** via Yahoo Finance or the full Ticker Map file.
-            * **Methodology**: Calculates forward returns for all historical periods matching the criteria.
-            * **Metrics**:
-                * **Profit Factor**: Gross Wins / Gross Losses.
-                * **Win Rate**: Percentage of trades that closed positive.
-                * **EV**: Average Return % per trade.
-            """)
-
-        c_left, c_right = st.columns([1, 6])
-        
-        with c_left:
-            ticker = st.text_input("Ticker", value="NFLX", help="Enter a symbol (e.g., TSLA, NVDA)", key="rsi_bt_ticker_input").strip().upper()
-            lookback_years = st.number_input("Lookback Years", min_value=1, max_value=10, value=10)
-            rsi_tol = st.number_input("RSI Tolerance", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-            rsi_metric_container = st.empty()
-        
-        if ticker:
-            ticker_map = load_ticker_map()
-            
-            with st.spinner(f"Crunching numbers for {ticker}..."):
-                df = get_ticker_technicals(ticker, ticker_map)
-                
-                if df is None or df.empty:
-                    df = fetch_yahoo_data(ticker)
-                
-                if df is None or df.empty:
-                    st.error(f"Sorry, data could not be retrieved for {ticker} (neither via Drive nor Yahoo Finance).")
-                else:
-                    df.columns = [c.strip().upper() for c in df.columns]
-                    
-                    date_col = next((c for c in df.columns if 'DATE' in c), None)
-                    close_col = next((c for c in df.columns if 'CLOSE' in c), None)
-                    rsi_priority = ['RSI14', 'RSI', 'RSI_14']
-                    rsi_col = next((c for c in rsi_priority if c in df.columns), None)
-                    
-                    if not rsi_col:
-                        rsi_col = next((c for c in df.columns if 'RSI' in c and 'W_' not in c), None)
-
-                    if not all([date_col, close_col]):
-                        st.error("Data source missing Date or Close columns.")
-                    else:
-                        df[date_col] = pd.to_datetime(df[date_col])
-                        df = df.sort_values(by=date_col).reset_index(drop=True)
-
-                        if not rsi_col:
-                            delta = df[close_col].diff()
-                            gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-                            loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-                            rs = gain / loss
-                            df['RSI'] = 100 - (100 / (1 + rs))
-                            rsi_col = 'RSI'
-
-                        cutoff_date = df[date_col].max() - timedelta(days=365*lookback_years)
-                        df = df[df[date_col] >= cutoff_date].copy().reset_index(drop=True) 
-
-                        current_row = df.iloc[-1]
-                        current_rsi = current_row[rsi_col]
-                        
-                        rsi_metric_container.markdown(f"""<div style="margin-top: 10px; font-size: 0.9rem; color: #666;">Current RSI</div><div style="font-size: 1.5rem; font-weight: 600; margin-bottom: 15px;">{current_rsi:.2f}</div>""", unsafe_allow_html=True)
-                        
-                        rsi_min = current_rsi - rsi_tol
-                        rsi_max = current_rsi + rsi_tol
-                        
-                        hist_df = df.iloc[:-1].copy()
-                        matches = hist_df[(hist_df[rsi_col] >= rsi_min) & (hist_df[rsi_col] <= rsi_max)].copy()
-                        
-                        full_close = df[close_col].values
-                        match_indices = matches.index.values
-                        total_len = len(full_close)
-
-                        results = []
-                        periods = [1, 3, 5, 7, 10, 14, 30, 60, 90, 180]
-                        
-                        for p in periods:
-                            valid_indices = match_indices[match_indices + p < total_len]
-                            
-                            if len(valid_indices) == 0:
-                                results.append({"Days": p, "Win Rate": np.nan, "EV": np.nan, "Count": 0, "Profit Factor": np.nan})
-                                continue
-                                
-                            entry_prices = full_close[valid_indices]
-                            exit_prices = full_close[valid_indices + p]
-                            
-                            returns = (exit_prices - entry_prices) / entry_prices
-                            
-                            wins = returns[returns > 0]
-                            losses = returns[returns < 0]
-                            gross_win = np.sum(wins)
-                            gross_loss = np.abs(np.sum(losses))
-                            
-                            pf = gross_win / gross_loss if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
-                            
-                            win_rate = np.mean(returns > 0) * 100
-                            avg_ret = np.mean(returns) * 100
-                            
-                            results.append({
-                                "Days": p, 
-                                "Profit Factor": pf, 
-                                "Win Rate": win_rate, 
-                                "EV": avg_ret, 
-                                "Count": len(valid_indices)
-                            })
-
-                        res_df = pd.DataFrame(results)
-
-                        with c_right:
-                            if matches.empty:
-                                st.warning(f"No historical periods found where RSI was between {rsi_min:.2f} and {rsi_max:.2f}.")
-                            else:
-                                def highlight_best(row):
-                                    days = row['Days']
-                                    if days <= 20: threshold = 30
-                                    elif days <= 60: threshold = 20
-                                    else: threshold = 10
-                                    
-                                    condition = (row['Count'] >= threshold) and (row['Win Rate'] > 75)
-                                    color = 'background-color: rgba(144, 238, 144, 0.2)' if condition else ''
-                                    return [color] * len(row)
-
-                                def highlight_ret(val):
-                                    if val is None or pd.isna(val): return ''
-                                    if not isinstance(val, (int, float)): return ''
-                                    color = '#71d28a' if val > 0 else '#f29ca0'
-                                    return f'color: {color}; font-weight: bold;'
-                                
-                                format_func = lambda x: f"{x:+.2f}%" if pd.notnull(x) else "—"
-                                format_wr = lambda x: f"{x:.1f}%" if pd.notnull(x) else "—"
-                                format_pf = lambda x: f"{x:.2f}" if pd.notnull(x) else "—"
-
-                                st.dataframe(
-                                    res_df.style
-                                    .format({"Win Rate": format_wr, "EV": format_func, "Profit Factor": format_pf})
-                                    .map(highlight_ret, subset=["EV"])
-                                    .apply(highlight_best, axis=1)
-                                    .set_table_styles([dict(selector="th", props=[("font-weight", "bold"), ("background-color", "#f0f2f6")])]),
-                                    use_container_width=False,
-                                    column_config={
-                                        "Days": st.column_config.NumberColumn("Days", width=60),
-                                        "Profit Factor": st.column_config.NumberColumn("Profit Factor", width=80),
-                                        "Win Rate": st.column_config.TextColumn("Win Rate", width=80),
-                                        "EV": st.column_config.TextColumn("EV", width=80),
-                                        "Count": st.column_config.NumberColumn("Count", width=60)
-                                    },
-                                    hide_index=True
-                                )
-
-                        st.markdown("<br><br><br>", unsafe_allow_html=True)
-                
-st.markdown("""<style>
-.block-container{padding-top:3.5rem;padding-bottom:1rem;}
-.zones-panel{padding:14px 0; border-radius:10px;}
-.zone-row{display:flex; align-items:center; gap:10px; margin:8px 0;}
-.zone-label{width:90px; font-weight:700; text-align:right; flex-shrink: 0; font-size: 13px;}
-.zone-wrapper{
-    flex-grow: 1; 
-    position: relative; 
-    height: 24px; 
-    background-color: rgba(0,0,0,0.03);
-    border-radius: 4px;
-    overflow: hidden;
-}
-.zone-bar{
-    position: absolute;
-    left: 0; 
-    top: 0; 
-    bottom: 0; 
-    z-index: 1;
-    border-radius: 3px;
-    opacity: 0.65;
-}
-.zone-bull{background-color: #71d28a;}
-.zone-bear{background-color: #f29ca0;}
-.zone-value{
-    position: absolute;
-    right: 8px;
-    top: 0;
-    bottom: 0;
-    display: flex;
-    align-items: center;
-    z-index: 2;
-    font-size: 12px; 
-    font-weight: 700;
-    color: #1f1f1f;
-    white-space: nowrap;
-    text-shadow: 0 0 4px rgba(255,255,255,0.8);
-}
-.price-divider { display: flex; align-items: center; justify-content: center; position: relative; margin: 24px 0; width: 100%; }
-.price-divider::before, .price-divider::after { content: ""; flex-grow: 1; height: 2px; background: #66b7ff; opacity: 0.4; }
-.price-badge { background: rgba(102, 183, 255, 0.1); color: #66b7ff; border: 1px solid rgba(102, 183, 255, 0.5); border-radius: 16px; padding: 6px 14px; font-weight: 800; font-size: 12px; letter-spacing: 0.5px; white-space: nowrap; margin: 0 12px; z-index: 1; }
-.metric-row{display:flex;gap:10px;flex-wrap:wrap;margin:.35rem 0 .75rem 0}
-.badge{background: rgba(128, 128, 128, 0.08); border: 1px solid rgba(128, 128, 128, 0.2); border-radius:18px; padding:6px 10px; font-weight:700}
-.price-badge-header{background: rgba(102, 183, 255, 0.1); border: 1px solid #66b7ff; border-radius:18px; padding:6px 10px; font-weight:800}
-.light-note { opacity: 0.7; font-size: 14px; margin-bottom: 10px; }
-
-</style>""", unsafe_allow_html=True)
-
-try:
-    # Use empty dataframe as placeholder since db features were removed
-    df_placeholder = pd.DataFrame()
-    run_rsi_scanner_app(df_placeholder)
-    
-except Exception as e: 
-    st.error(f"Error initializing dashboard: {e}")
