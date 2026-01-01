@@ -827,17 +827,7 @@ def find_rsi_percentile_signals(df, ticker, pct_low=0.10, pct_high=0.90, min_n=1
                 # Standard convention: Hold period X starts from entry.
                 # So Entry at i+1. Exit at i+1+p_val.
                 entry_idx = i + 1
-                exit_idx = i + 1 + p_val - 1 # If hold 1 day, sell same day close? 
-                # Let's assume standard "Hold Period" means Duration.
-                # Entry Index = i+1. Exit Index = i + 1 + p_val.
-                # Example: Period=1. Buy Day 2 Open. Sell Day 3 Close. (Hold 1 overnight).
-                # Actually, usually "10 Day Hold" implies Price(T+10) - Price(T).
-                # Let's use Exit Index = i + p_val (Hold from Close to Close in stats, but here Open to Close)
-                # Let's align with the scanner logic: Scanner uses i + p for returns.
-                # So Entry: i+1 (Open). Exit: i+1+p_val (Close).
-                
-                entry_idx = i + 1
-                exit_idx = i + p_val + 1
+                exit_idx = i + 1 + p_val + 1
 
                 if exit_idx < len(hist_df):
                     # Check validity of 'Open' column
@@ -909,7 +899,6 @@ def run_rsi_scanner_app(df_global):
 
     with tab_pct_bt:
         st.markdown("### 📊 Strategy Backtester")
-        # REMOVED CAPTION HERE per instruction
         
         # --- INPUTS (Mirrors Percentiles) ---
         data_option_bt = st.pills("Dataset", options=options, selection_mode="single", default=options[0] if options else None, label_visibility="collapsed", key="rsi_bt_pills_new")
@@ -1080,7 +1069,7 @@ def run_rsi_scanner_app(df_global):
                             # --- TABLE 1: TICKER SUMMARY ---
                             st.subheader("Results by Ticker")
                             
-                            # (c) Methodology Expander
+                            # Methodology Expander
                             with st.expander("ℹ️ Strategy Methodology"):
                                 st.markdown("""
                                 **Strategy Execution:**
@@ -1090,7 +1079,7 @@ def run_rsi_scanner_app(df_global):
                                 4. **Sell:** At **Close** on the last day of that period.
                                 """)
 
-                            # (d) Layout: Ticker Input & Download Button side-by-side
+                            # Layout: Ticker Input & Download Button side-by-side
                             c_filter, c_dl = st.columns([2, 1])
                             
                             with c_filter:
@@ -1173,6 +1162,51 @@ def run_rsi_scanner_app(df_global):
                                 use_container_width=True
                             )
                             st.caption(f"ℹ️ **Max Active:** Peak number of simultaneous trades. You would need to split capital into **{int(max_active)} units** (approx {100/max_active:.1f}% each) to take every signal without running out of cash.")
+                            st.caption(f"ℹ️ **Avg Active:** Average number of simultaneous trades. On a typical day, you are holding **{avg_active:.1f} positions**.")
+
+                            # --- PORTFOLIO FEASIBILITY CALCULATOR ---
+                            with st.expander("🧮 Portfolio Feasibility Calculator", expanded=True):
+                                pf_col1, pf_col2 = st.columns(2)
+                                with pf_col1:
+                                    pf_amount = st.number_input("Portfolio Size ($)", value=1000000, step=100000)
+                                with pf_col2:
+                                    # Default to SPY Buy & Hold from the calculated metric if available, else 109.9
+                                    default_bm = 109.9
+                                    try: 
+                                        if 'spy_bh' in locals(): default_bm = spy_bh * 100
+                                    except: pass
+                                    bm_return_pct = st.number_input("Target Benchmark Return (%)", value=float(f"{default_bm:.1f}"), step=1.0) / 100.0
+                                
+                                target_profit = pf_amount * bm_return_pct
+                                strat_total_return_mult = df_res['BT_Return'].sum() # e.g., 368.17 = 36817%
+                                
+                                st.markdown("---")
+                                
+                                if strat_total_return_mult > 0:
+                                    # 1. How big must each bet be to hit the profit target?
+                                    req_unit_size = target_profit / strat_total_return_mult
+                                    
+                                    # 2. How much capital is needed to sustain that bet size at peak congestion?
+                                    req_peak_capital = req_unit_size * max_active
+                                    
+                                    # 3. Utilization
+                                    utilization = req_peak_capital / pf_amount
+                                    
+                                    cal_c1, cal_c2 = st.columns(2)
+                                    cal_c1.metric("Required Unit Size", f"${req_unit_size:,.2f}", help="To generate enough raw profit to beat the benchmark")
+                                    cal_c2.metric("Peak Capital Needed", f"${req_peak_capital:,.0f}", help=f"${req_unit_size:,.0f} x {int(max_active)} max active trades")
+                                    
+                                    if req_peak_capital > pf_amount:
+                                        shortfall = req_peak_capital - pf_amount
+                                        st.error(f"❌ **Strategy Busted.** Liquidity Crisis.")
+                                        st.markdown(f"You need **${req_peak_capital:,.0f}** to trade this strategy effectively, but only have **${pf_amount:,.0f}**.")
+                                        st.markdown(f"**Optimization Tip:** Increase 'Minimum N' or 'RSI Low' to reduce the 'Max Active' count below **{int(pf_amount/req_unit_size)}**.")
+                                    else:
+                                        st.success(f"✅ **Feasible!** Strategy works.")
+                                        st.markdown(f"You only need to allocate **{utilization:.1%}** (${req_peak_capital:,.0f}) of your portfolio to the strategy to beat the benchmark.")
+                                        st.caption("The remaining cash sits idle. You are highly capital efficient.")
+                                else:
+                                    st.warning("Strategy has negative total return. Cannot beat a positive benchmark.")
 
                             # --- TABLE 2: BENCHMARK COMPARISON ---
                             st.subheader("Annual Benchmark Comparison")
@@ -1252,7 +1286,7 @@ def run_rsi_scanner_app(df_global):
                                     "N_Start": "{:,}",
                                     "N_End": "{:,}"
                                 }),
-                                # REMOVED color_ret map per instruction (a)
+                                # REMOVED color_ret map per instruction
                                 hide_index=True,
                                 use_container_width=True,
                                 column_config={
