@@ -864,7 +864,7 @@ def run_rsi_scanner_app(df_global):
 
     with tab_pct_bt:
         st.markdown("### 📊 Strategy Backtester")
-        st.caption("Strategy: Buy at Open (Day T+1) → Hold for Optimal Period → Sell at Close (Day T+Period). Date Range: 2020-2025.")
+        st.caption("Strategy: Buy at Open (Day T+1) → Hold for Optimal Period → Sell at Close (Day T+Period).")
         
         # --- INPUTS (Mirrors Percentiles) ---
         data_option_bt = st.pills("Dataset", options=options, selection_mode="single", default=options[0] if options else None, label_visibility="collapsed", key="rsi_bt_pills_new")
@@ -878,13 +878,18 @@ def run_rsi_scanner_app(df_global):
         idx_show = show_opts.index(curr_show) if curr_show in show_opts else 0
         with pct_col3: show_filter_bt = st.selectbox("Actions to Show", show_opts, index=idx_show, key="rsi_bt_show")
 
-        pct_col4, pct_col5, pct_col6, pct_col7 = st.columns(4)
-        with pct_col4: 
-            st.info("🗓️ Range: Jan 1 2020 - Dec 31 2025")
-        with pct_col5: min_n_bt = st.number_input("Minimum N", min_value=0, value=st.session_state.saved_rsi_pct_min_n, step=1, key="rsi_bt_min_n")
-        with pct_col6: 
+        # Updates: Split inputs to accommodate Dates
+        bt_c1, bt_c2, bt_c3, bt_c4, bt_c5 = st.columns(5)
+        
+        with bt_c1: 
+            bt_start_date = st.date_input("Start Date", value=date(2020, 1, 1), key="rsi_bt_start")
+        with bt_c2:
+            bt_end_date = st.date_input("End Date", value=date(2025, 12, 31), key="rsi_bt_end")
+        with bt_c3: 
+            min_n_bt = st.number_input("Minimum N", min_value=0, value=st.session_state.saved_rsi_pct_min_n, step=1, key="rsi_bt_min_n")
+        with bt_c4: 
             periods_str_bt = st.text_input("Test Periods (days)", value=st.session_state.saved_rsi_pct_periods, key="rsi_bt_periods")
-        with pct_col7:
+        with bt_c5:
              curr_pct_opt = st.session_state.saved_rsi_pct_opt
              idx_pct_opt = ["Profit Factor", "SQN"].index(curr_pct_opt) if curr_pct_opt in ["Profit Factor", "SQN"] else 1
              opt_mode_bt = st.selectbox("Optimize By", ["Profit Factor", "SQN"], index=idx_pct_opt, key="rsi_bt_opt")
@@ -892,8 +897,7 @@ def run_rsi_scanner_app(df_global):
         periods_bt = parse_periods(periods_str_bt)
         pct_opt_code_bt = OPT_MAP[opt_mode_bt]
         
-        # --- TICKER FILTER ---
-        ticker_input_bt = st.text_input("Ticker Filter (Leave empty for all)", key="rsi_bt_ticker_input_filter").strip().upper()
+        # --- TICKER FILTER REMOVED FROM HERE ---
 
         if data_option_bt:
             try:
@@ -915,13 +919,12 @@ def run_rsi_scanner_app(df_global):
                         grouped_list = list(grouped)
                         total_groups = len(grouped_list)
                         
-                        start_cutoff = date(2020, 1, 1)
-                        end_cutoff = date(2025, 12, 31)
+                        # Use User Selected Dates
+                        start_cutoff = bt_start_date
+                        end_cutoff = bt_end_date
 
                         for i, (ticker, group) in enumerate(grouped_list):
-                            # Filter group by ticker if input is present
-                            if ticker_input_bt and ticker != ticker_input_bt:
-                                continue
+                            # REMOVED PRE-FILTER: Run on all tickers to get accurate Benchmark table
                                 
                             d_d, _ = prepare_data(group.copy())
                             if d_d is not None:
@@ -933,7 +936,7 @@ def run_rsi_scanner_app(df_global):
                                     if show_filter_bt == "Leaving High" and s['Signal_Type'] != "Bearish": continue
                                     if show_filter_bt == "Leaving Low" and s['Signal_Type'] != "Bullish": continue
 
-                                    # Filter by Date Range (2020-2025)
+                                    # Filter by Date Range (User Selected)
                                     s_date = s['Date_Obj']
                                     if s_date < start_cutoff or s_date > end_cutoff:
                                         continue
@@ -973,100 +976,123 @@ def run_rsi_scanner_app(df_global):
                         if raw_signals_bt:
                             df_res = pd.DataFrame(raw_signals_bt)
                             
-                            # --- TABLE 1: TICKER SUMMARY ---
-                            st.subheader("Results by Ticker")
-                            
-                            # Aggregate
-                            agg_ticker = df_res.groupby('Ticker').agg(
-                                N_Trades=('BT_Return', 'count'),
-                                Avg_Hold=('BT_Hold_Days', 'mean'),
-                                Overall_Return=('BT_Return', 'sum') # Simple sum as per "same position size"
-                            ).reset_index()
-                            
-                            # Cap at 50 rows, filter if ticker input
-                            if ticker_input_bt:
-                                agg_ticker = agg_ticker[agg_ticker['Ticker'] == ticker_input_bt]
-                            
-                            agg_ticker = agg_ticker.head(50)
-                            
-                            st.dataframe(
-                                agg_ticker.style.format({
-                                    "Avg_Hold": "{:.1f} d", 
-                                    "Overall_Return": "{:+.2%}"
-                                }),
-                                column_config={
-                                    "Ticker": "Ticker",
-                                    "N_Trades": "N",
-                                    "Avg_Hold": "Avg Hold Time",
-                                    "Overall_Return": "Overall Return"
-                                },
-                                hide_index=True,
-                                use_container_width=True,
-                                height=get_table_height(agg_ticker, 10)
-                            )
-                            
-                            # --- TABLE 2: BENCHMARK COMPARISON ---
-                            st.subheader("Annual Benchmark Comparison")
-                            
-                            # Add Year Column based on EXIT date
-                            df_res['Exit_Year'] = pd.to_datetime(df_res['BT_Exit_Date']).dt.year
-                            df_res['Start_Year'] = pd.to_datetime(df_res['BT_Entry_Date']).dt.year
-                            
-                            years = range(2021, 2026)
-                            bm_rows = []
-                            
-                            # Overall Row
-                            ov_strat = df_res['BT_Return'].sum()
-                            ov_spy = df_res['SPY_Ret'].sum()
-                            ov_qqq = df_res['QQQ_Ret'].sum()
-                            ov_n_start = len(df_res) # Total started
-                            ov_n_end = len(df_res) # Total ended (since we filtered None returns)
-                            
-                            bm_rows.append({
-                                "Year": "Overall",
-                                "Strategy Return": ov_strat,
-                                "SPY Return": ov_spy,
-                                "QQQ Return": ov_qqq,
-                                "N_Start": ov_n_start,
-                                "N_End": ov_n_end
-                            })
+                            # Layout Columns
+                            res_col1, res_col2 = st.columns([1, 1], gap="large")
 
-                            for y in years:
-                                # Trades ending in Year y
-                                ended_in_y = df_res[df_res['Exit_Year'] == y]
-                                # Trades starting in Year y
-                                started_in_y = df_res[df_res['Start_Year'] == y]
+                            with res_col1:
+                                # --- TABLE 1: TICKER SUMMARY ---
+                                st.subheader("Results by Ticker")
                                 
-                                strat_ret = ended_in_y['BT_Return'].sum()
-                                spy_ret = ended_in_y['SPY_Ret'].sum()
-                                qqq_ret = ended_in_y['QQQ_Ret'].sum()
+                                # Ticker Input moved here
+                                ticker_input_bt = st.text_input("Ticker Filter (Leave empty for all)", key="rsi_bt_ticker_input_filter").strip().upper()
+
+                                # Aggregate
+                                agg_ticker = df_res.groupby('Ticker').agg(
+                                    N_Trades=('BT_Return', 'count'),
+                                    Avg_Hold=('BT_Hold_Days', 'mean'),
+                                    Overall_Return=('BT_Return', 'sum') # Simple sum as per "same position size"
+                                ).reset_index()
+                                
+                                # Filter if ticker input provided
+                                if ticker_input_bt:
+                                    agg_ticker = agg_ticker[agg_ticker['Ticker'] == ticker_input_bt]
+                                
+                                # Sort by return high to low for better visibility
+                                agg_ticker = agg_ticker.sort_values(by="Overall_Return", ascending=False)
+                                agg_ticker = agg_ticker.head(50)
+                                
+                                st.dataframe(
+                                    agg_ticker.style.format({
+                                        "Avg_Hold": "{:.1f} d", 
+                                        "Overall_Return": "{:+.2%}"
+                                    }),
+                                    column_config={
+                                        "Ticker": "Ticker",
+                                        "N_Trades": "N",
+                                        "Avg_Hold": "Avg Hold Time",
+                                        "Overall_Return": "Overall Return"
+                                    },
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    height=get_table_height(agg_ticker, 15)
+                                )
+
+                            with res_col2:
+                                # --- TABLE 2: BENCHMARK COMPARISON ---
+                                st.subheader("Annual Benchmark Comparison")
+                                
+                                with st.expander("ℹ️ Methodology"):
+                                    st.markdown("""
+                                    **"Apples-to-Apples" Comparison:**
+                                    * **Same Dates:** The Index (SPY/QQQ) is "bought" on the exact same Entry Date and "sold" on the exact same Exit Date as the strategy signal.
+                                    * **Same Position Size:** Returns are calculated assuming an equal dollar amount allocated to every trade.
+                                    * **No Look-Ahead:** The index trade uses the Strategy's optimal holding period (determined by historical data prior to the signal).
+                                    """)
+
+                                # Add Year Column based on EXIT date
+                                df_res['Exit_Year'] = pd.to_datetime(df_res['BT_Exit_Date']).dt.year
+                                
+                                # Determine years from user selection
+                                start_yr = bt_start_date.year
+                                end_yr = bt_end_date.year
+                                years = range(start_yr, end_yr + 1)
+                                
+                                bm_rows = []
+                                
+                                # Calculate Annual Rows
+                                for y in years:
+                                    # Trades ending in Year y
+                                    ended_in_y = df_res[df_res['Exit_Year'] == y]
+                                    
+                                    # If no trades ended this year, we still show the row with 0s? 
+                                    # Or skip? Usually nicer to show 0s.
+                                    strat_ret = ended_in_y['BT_Return'].sum()
+                                    spy_ret = ended_in_y['SPY_Ret'].sum()
+                                    qqq_ret = ended_in_y['QQQ_Ret'].sum()
+                                    
+                                    bm_rows.append({
+                                        "Year": str(y),
+                                        "Strategy Return": strat_ret,
+                                        "SPY Return": spy_ret,
+                                        "QQQ Return": qqq_ret,
+                                        "N_End": len(ended_in_y)
+                                    })
+                                
+                                # Calculate Overall Row (Last)
+                                ov_strat = df_res['BT_Return'].sum()
+                                ov_spy = df_res['SPY_Ret'].sum()
+                                ov_qqq = df_res['QQQ_Ret'].sum()
+                                ov_n_end = len(df_res)
                                 
                                 bm_rows.append({
-                                    "Year": str(y),
-                                    "Strategy Return": strat_ret,
-                                    "SPY Return": spy_ret,
-                                    "QQQ Return": qqq_ret,
-                                    "N_Start": len(started_in_y),
-                                    "N_End": len(ended_in_y)
+                                    "Year": "Overall",
+                                    "Strategy Return": ov_strat,
+                                    "SPY Return": ov_spy,
+                                    "QQQ Return": ov_qqq,
+                                    "N_End": ov_n_end
                                 })
-                            
-                            bm_df = pd.DataFrame(bm_rows)
-                            
-                            def highlight_bm(row):
-                                styles = [''] * len(row)
-                                if row['Year'] == "Overall":
-                                    return ['font-weight: bold; background-color: #f0f2f6'] * len(row)
-                                return styles
 
-                            st.dataframe(
-                                bm_df.style.apply(highlight_bm, axis=1).format({
-                                    "Strategy Return": "{:+.2%}",
-                                    "SPY Return": "{:+.2%}",
-                                    "QQQ Return": "{:+.2%}"
-                                }),
-                                hide_index=True,
-                                use_container_width=False
-                            )
+                                bm_df = pd.DataFrame(bm_rows)
+                                
+                                def highlight_bm(row):
+                                    styles = [''] * len(row)
+                                    if row['Year'] == "Overall":
+                                        return ['font-weight: bold; background-color: #f0f2f6; border-top: 2px solid #ccc'] * len(row)
+                                    return styles
+
+                                st.dataframe(
+                                    bm_df.style.apply(highlight_bm, axis=1).format({
+                                        "Strategy Return": "{:.0%}",
+                                        "SPY Return": "{:.0%}",
+                                        "QQQ Return": "{:.0%}",
+                                        "N_End": "{:,}"
+                                    }),
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    column_config={
+                                        "N_End": st.column_config.TextColumn("N Trades")
+                                    }
+                                )
                             
                             # --- CSV DOWNLOAD ---
                             csv = df_res.to_csv(index=False).encode('utf-8')
@@ -1076,6 +1102,9 @@ def run_rsi_scanner_app(df_global):
                                 file_name='rsi_percentile_backtest.csv',
                                 mime='text/csv',
                             )
+
+                            # Invisible Buffer
+                            st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
                             
                         else:
                             st.warning("No signals found matching criteria in the backtest period.")
