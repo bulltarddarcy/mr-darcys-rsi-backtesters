@@ -987,6 +987,19 @@ def run_rsi_scanner_app(df_global):
                         if raw_signals_bt:
                             df_res = pd.DataFrame(raw_signals_bt)
                             
+                            # --- FORMATTING HELPERS ---
+                            def fmt_pct(x):
+                                """Formats 0.10 as 10%, -0.05 as (5%), 10.0 as 1,000%"""
+                                if not isinstance(x, (float, int)) or pd.isna(x): return x
+                                if x < 0: return f"({abs(x):,.0%})"
+                                return f"{x:,.0%}"
+
+                            def color_ret(val):
+                                """Light green for positive, light red for negative"""
+                                if not isinstance(val, (float, int)) or pd.isna(val): return ''
+                                color = '#e6f4ea' if val >= 0 else '#fce8e6' 
+                                return f'background-color: {color}; color: #000000;'
+
                             # Layout Columns
                             res_col1, res_col2 = st.columns([1, 1], gap="large")
 
@@ -1019,13 +1032,14 @@ def run_rsi_scanner_app(df_global):
                                 
                                 # Sort by return high to low for better visibility
                                 agg_ticker = agg_ticker.sort_values(by="Overall_Return", ascending=False)
-                                # REMOVED 50 row limit
                                 
                                 st.dataframe(
-                                    agg_ticker.style.format({
+                                    agg_ticker.style
+                                    .format({
                                         "Avg_Hold": "{:.1f} d", 
-                                        "Overall_Return": "{:+.2%}"
-                                    }),
+                                        "Overall_Return": fmt_pct
+                                    })
+                                    .map(color_ret, subset=["Overall_Return"]),
                                     column_config={
                                         "Ticker": "Ticker",
                                         "N_Trades": "N",
@@ -1046,11 +1060,13 @@ def run_rsi_scanner_app(df_global):
                                     "Overall_Return": df_res['BT_Return'].sum()
                                 }])
                                 st.dataframe(
-                                    agg_all.style.format({
+                                    agg_all.style
+                                    .format({
                                         "Avg_Hold": "{:.1f} d", 
-                                        "Overall_Return": "{:+.2%}",
+                                        "Overall_Return": fmt_pct,
                                         "N_Trades": "{:,}"
-                                    }),
+                                    })
+                                    .map(color_ret, subset=["Overall_Return"]),
                                     column_config={
                                         "N_Trades": "Total N",
                                         "Avg_Hold": "Avg Hold Time",
@@ -1119,16 +1135,20 @@ def run_rsi_scanner_app(df_global):
                                 def highlight_bm(row):
                                     styles = [''] * len(row)
                                     if row['Year'] == "Overall":
+                                        # Only bold the Year and N_End, let color_ret handle the numbers
                                         return ['font-weight: bold; background-color: #f0f2f6; border-top: 2px solid #ccc'] * len(row)
                                     return styles
 
                                 st.dataframe(
-                                    bm_df.style.apply(highlight_bm, axis=1).format({
-                                        "Strategy Return": "{:.0%}",
-                                        "SPY Return": "{:.0%}",
-                                        "QQQ Return": "{:.0%}",
+                                    bm_df.style
+                                    .apply(highlight_bm, axis=1)
+                                    .format({
+                                        "Strategy Return": fmt_pct,
+                                        "SPY Return": fmt_pct,
+                                        "QQQ Return": fmt_pct,
                                         "N_End": "{:,}"
-                                    }),
+                                    })
+                                    .map(color_ret, subset=["Strategy Return", "SPY Return", "QQQ Return"]),
                                     hide_index=True,
                                     use_container_width=True,
                                     column_config={
