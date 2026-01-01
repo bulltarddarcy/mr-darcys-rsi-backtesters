@@ -85,7 +85,7 @@ def get_stock_indicators(sym: str):
         
         sma200 = float(h_full["SMA_200"].iloc[-1]) if "SMA_200" in h_full.columns else None
         
-        h_recent = h_full.iloc[-60:].copy() if len(h_recent) > 60 else h_full.copy()
+        h_recent = h_full.iloc[-60:].copy() if len(h_full) > 60 else h_full.copy()
         if len(h_recent) == 0: return None, None, None, None, None
         
         spot_val = float(h_recent["Close"].iloc[-1])
@@ -884,14 +884,14 @@ def run_rsi_scanner_app(df_global):
     
     # We'll set the default date dynamically below, but init here to avoid errors
     if 'saved_rsi_pct_date' not in st.session_state: st.session_state.saved_rsi_pct_date = None
-    if 'saved_rsi_pct_min_n' not in st.session_state: st.session_state.saved_rsi_pct_min_n = 1
+    if 'saved_rsi_pct_min_n' not in st.session_state: st.session_state.saved_rsi_pct_min_n = 5
     if 'saved_rsi_pct_periods' not in st.session_state: st.session_state.saved_rsi_pct_periods = "10,30,60,90,180"
 
     # New Filter States
-    if 'saved_rsi_min_pf' not in st.session_state: st.session_state.saved_rsi_min_pf = 1.5
-    if 'saved_rsi_min_wr' not in st.session_state: st.session_state.saved_rsi_min_wr = 60
-    if 'saved_rsi_min_ev' not in st.session_state: st.session_state.saved_rsi_min_ev = 1.0
-    if 'saved_rsi_min_sqn' not in st.session_state: st.session_state.saved_rsi_min_sqn = 2.0
+    if 'saved_rsi_min_pf' not in st.session_state: st.session_state.saved_rsi_min_pf = 2.0
+    if 'saved_rsi_min_wr' not in st.session_state: st.session_state.saved_rsi_min_wr = 75
+    if 'saved_rsi_min_ev' not in st.session_state: st.session_state.saved_rsi_min_ev = 10.0
+    if 'saved_rsi_min_sqn' not in st.session_state: st.session_state.saved_rsi_min_sqn = 3.0
 
     def save_rsi_state(key, saved_key):
         st.session_state[saved_key] = st.session_state[key]
@@ -1182,49 +1182,77 @@ def run_rsi_scanner_app(df_global):
                             st.caption(f"ℹ️ **Max Active:** Peak number of simultaneous trades. You would need to split capital into **{int(max_active)} units** (approx {100/max_active:.1f}% each) to take every signal without running out of cash.")
                             st.caption(f"ℹ️ **Avg Active:** Average number of simultaneous trades. On a typical day, you are holding **{avg_active:,.0f} positions**.")
 
+                            # --- PRE-CALCULATE BUY & HOLD FOR BENCHMARK REFERENCE ---
+                            def get_bh_return(bm_df, start_d, end_d):
+                                try:
+                                    # Ensure naive
+                                    start_d = datetime(start_d.year, start_d.month, start_d.day)
+                                    end_d = datetime(end_d.year, end_d.month, end_d.day)
+                                    
+                                    # Handle empty DF
+                                    if bm_df.empty: return 0.0
+
+                                    idx_s = bm_df.index.get_indexer([start_d], method='nearest')[0]
+                                    idx_e = bm_df.index.get_indexer([end_d], method='nearest')[0]
+                                    
+                                    p_s = bm_df.iloc[idx_s]['CLOSE']
+                                    p_e = bm_df.iloc[idx_e]['CLOSE']
+                                    
+                                    return (p_e - p_s) / p_s
+                                except:
+                                    return 0.0
+
+                            spy_bh = get_bh_return(spy_df, bt_start_date, bt_end_date)
+                            qqq_bh = get_bh_return(qqq_df, bt_start_date, bt_end_date)
+
                             # --- PORTFOLIO FEASIBILITY CALCULATOR ---
                             with st.expander("🧮 Portfolio Feasibility Calculator", expanded=True):
+                                # Determine Max Benchmark Return for comparison
+                                max_index_ret = max(spy_bh, qqq_bh)
+                                
                                 pf_col1, pf_col2 = st.columns(2)
                                 with pf_col1:
                                     pf_amount = st.number_input("Portfolio Size ($)", value=1000000, step=100000)
                                 with pf_col2:
-                                    # Default to SPY Buy & Hold from the calculated metric if available, else 109.9
-                                    default_bm = 109.9
-                                    try: 
-                                        if 'spy_bh' in locals(): default_bm = spy_bh * 100
-                                    except: pass
-                                    bm_return_pct = st.number_input("Target Benchmark Return (%)", value=float(f"{default_bm:.1f}"), step=1.0) / 100.0
-                                
-                                target_profit = pf_amount * bm_return_pct
+                                    st.metric("Target Benchmark (Max Index)", f"{max_index_ret:.1%}")
+
                                 strat_total_return_mult = df_res['BT_Return'].sum() # e.g., 368.17 = 36817%
                                 
                                 st.markdown("---")
                                 
-                                if strat_total_return_mult > 0:
-                                    # 1. How big must each bet be to hit the profit target?
-                                    req_unit_size = target_profit / strat_total_return_mult
+                                if strat_total_return_mult > 0 and max_active > 0:
+                                    # 1. Max Safe Unit Size (Use full portfolio divided by peak active trades)
+                                    max_safe_unit = pf_amount / max_active
                                     
-                                    # 2. How much capital is needed to sustain that bet size at peak congestion?
-                                    req_peak_capital = req_unit_size * max_active
+                                    # 2. Projected Profit using that unit size
+                                    projected_profit = max_safe_unit * strat_total_return_mult
                                     
-                                    # 3. Utilization
-                                    utilization = req_peak_capital / pf_amount
+                                    # 3. Ending Balance
+                                    ending_balance = pf_amount + projected_profit
+                                    
+                                    # 4. Compare to Benchmark
+                                    bench_balance = pf_amount * (1 + max_index_ret)
+                                    beats_bench = ending_balance > bench_balance
                                     
                                     cal_c1, cal_c2 = st.columns(2)
-                                    cal_c1.metric("Required Unit Size", f"${req_unit_size:,.0f}", help="To generate enough raw profit to beat the benchmark")
-                                    cal_c2.metric("Peak Capital Needed", f"${req_peak_capital:,.0f}", help=f"${req_unit_size:,.0f} x {int(max_active)} max active trades")
+                                    cal_c1.metric("Max Safe Unit Size", f"${max_safe_unit:,.0f}", help=f"Allocation per trade (${pf_amount:,.0f} / {int(max_active)} max active)")
                                     
-                                    if req_peak_capital > pf_amount:
-                                        shortfall = req_peak_capital - pf_amount
-                                        st.error(f"❌ **Strategy Busted.** Liquidity Crisis.")
-                                        st.markdown(f"You need **${req_peak_capital:,.0f}** to trade this strategy effectively, but only have **${pf_amount:,.0f}**.")
-                                        st.markdown(f"**Optimization Tip:** Increase 'Minimum N' or 'RSI Low' to reduce the 'Max Active' count below **{int(pf_amount/req_unit_size)}**.")
+                                    delta_val = ending_balance - bench_balance
+                                    cal_c2.metric("Ending Acct Bal", f"${ending_balance:,.0f}", delta=f"${delta_val:,.0f} vs Index", help=f"Total Result using Max Safe Unit Size vs Best Index Buy & Hold (${bench_balance:,.0f})")
+                                    
+                                    if beats_bench:
+                                        st.success(f"✅ **Strategy Beats Index!**")
+                                        st.markdown(f"By allocating **${max_safe_unit:,.0f}** per trade (using 100% of capital at peak), you turn **${pf_amount:,.0f}** into **${ending_balance:,.0f}**.")
                                     else:
-                                        st.success(f"✅ **Feasible!** Strategy works.")
-                                        st.markdown(f"You only need to allocate **{utilization:.1%}** (${req_peak_capital:,.0f}) of your portfolio to the strategy to beat the benchmark.")
-                                        st.caption("The remaining cash sits idle. You are highly capital efficient.")
+                                        st.error(f"❌ **Strategy Lags Index.**")
+                                        st.markdown(f"Even with max allocation, high cash drag prevents beating the index return of {max_index_ret:.1%}.")
+                                        st.markdown(f"**Tip:** You need to reduce 'Max Active' trades (tighter filters) so you can bet bigger per trade.")
+
                                 else:
-                                    st.warning("Strategy has negative total return. Cannot beat a positive benchmark.")
+                                    if strat_total_return_mult <= 0:
+                                        st.warning("Strategy has negative total return.")
+                                    else:
+                                        st.warning("No active trades detected.")
 
                             # --- TABLE 2: BENCHMARK COMPARISON ---
                             st.subheader("Annual Benchmark Comparison")
@@ -1317,28 +1345,7 @@ def run_rsi_scanner_app(df_global):
                             st.markdown("##### 🏛️ Passive Buy & Hold (Full Period)")
                             bh_cols = st.columns(2)
                             
-                            def get_bh_return(bm_df, start_d, end_d):
-                                try:
-                                    # Ensure naive
-                                    start_d = datetime(start_d.year, start_d.month, start_d.day)
-                                    end_d = datetime(end_d.year, end_d.month, end_d.day)
-                                    
-                                    # Handle empty DF
-                                    if bm_df.empty: return 0.0
-
-                                    idx_s = bm_df.index.get_indexer([start_d], method='nearest')[0]
-                                    idx_e = bm_df.index.get_indexer([end_d], method='nearest')[0]
-                                    
-                                    p_s = bm_df.iloc[idx_s]['CLOSE']
-                                    p_e = bm_df.iloc[idx_e]['CLOSE']
-                                    
-                                    return (p_e - p_s) / p_s
-                                except:
-                                    return 0.0
-
-                            spy_bh = get_bh_return(spy_df, bt_start_date, bt_end_date)
-                            qqq_bh = get_bh_return(qqq_df, bt_start_date, bt_end_date)
-                            
+                            # (Calculated above for feasibility calc, reused here)
                             bh_cols[0].metric("SPY Buy & Hold", f"{spy_bh:.1%}")
                             bh_cols[1].metric("QQQ Buy & Hold", f"{qqq_bh:.1%}")
                             
@@ -1351,213 +1358,3 @@ def run_rsi_scanner_app(df_global):
                         st.warning("No signals found matching criteria in the backtest period.")
 
             except Exception as e: st.error(f"Analysis failed: {e}")
-
-    # with tab_bot: (HIDDEN)
-    if False:
-        st.markdown('<div class="light-note" style="margin-bottom: 15px;">ℹ️ If this is buggy, just go back to the RSI Divergences tab and back here and it will work.</div>', unsafe_allow_html=True)
-        
-        with st.expander("ℹ️ Page Notes: Backtester Logic"):
-            st.markdown("""
-            * **Data Source**: Unlike the Divergences and Percentile tabs (which use limited ~10yr history files), this tab pulls **Complete Price History** via Yahoo Finance or the full Ticker Map file.
-            * **Methodology**: Calculates forward returns for all historical periods matching the criteria.
-            * **Metrics**:
-                * **Profit Factor**: Gross Wins / Gross Losses.
-                * **Win Rate**: Percentage of trades that closed positive.
-                * **EV**: Average Return % per trade.
-            """)
-
-        c_left, c_right = st.columns([1, 6])
-        
-        with c_left:
-            ticker = st.text_input("Ticker", value="NFLX", help="Enter a symbol (e.g., TSLA, NVDA)", key="rsi_bt_ticker_input").strip().upper()
-            lookback_years = st.number_input("Lookback Years", min_value=1, max_value=10, value=10)
-            rsi_tol = st.number_input("RSI Tolerance", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-            rsi_metric_container = st.empty()
-        
-        if ticker:
-            ticker_map = load_ticker_map()
-            
-            with st.spinner(f"Crunching numbers for {ticker}..."):
-                df = get_ticker_technicals(ticker, ticker_map)
-                
-                if df is None or df.empty:
-                    df = fetch_yahoo_data(ticker)
-                
-                if df is None or df.empty:
-                    st.error(f"Sorry, data could not be retrieved for {ticker} (neither via Drive nor Yahoo Finance).")
-                else:
-                    df.columns = [c.strip().upper() for c in df.columns]
-                    
-                    date_col = next((c for c in df.columns if 'DATE' in c), None)
-                    close_col = next((c for c in df.columns if 'CLOSE' in c), None)
-                    rsi_priority = ['RSI14', 'RSI', 'RSI_14']
-                    rsi_col = next((c for c in rsi_priority if c in df.columns), None)
-                    
-                    if not rsi_col:
-                        rsi_col = next((c for c in df.columns if 'RSI' in c and 'W_' not in c), None)
-
-                    if not all([date_col, close_col]):
-                        st.error("Data source missing Date or Close columns.")
-                    else:
-                        df[date_col] = pd.to_datetime(df[date_col])
-                        df = df.sort_values(by=date_col).reset_index(drop=True)
-
-                        if not rsi_col:
-                            delta = df[close_col].diff()
-                            gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-                            loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-                            rs = gain / loss
-                            df['RSI'] = 100 - (100 / (1 + rs))
-                            rsi_col = 'RSI'
-
-                        cutoff_date = df[date_col].max() - timedelta(days=365*lookback_years)
-                        df = df[df[date_col] >= cutoff_date].copy().reset_index(drop=True) 
-
-                        current_row = df.iloc[-1]
-                        current_rsi = current_row[rsi_col]
-                        
-                        rsi_metric_container.markdown(f"""<div style="margin-top: 10px; font-size: 0.9rem; color: #666;">Current RSI</div><div style="font-size: 1.5rem; font-weight: 600; margin-bottom: 15px;">{current_rsi:.2f}</div>""", unsafe_allow_html=True)
-                        
-                        rsi_min = current_rsi - rsi_tol
-                        rsi_max = current_rsi + rsi_tol
-                        
-                        hist_df = df.iloc[:-1].copy()
-                        matches = hist_df[(hist_df[rsi_col] >= rsi_min) & (hist_df[rsi_col] <= rsi_max)].copy()
-                        
-                        full_close = df[close_col].values
-                        match_indices = matches.index.values
-                        total_len = len(full_close)
-
-                        results = []
-                        periods = [1, 3, 5, 7, 10, 14, 30, 60, 90, 180]
-                        
-                        for p in periods:
-                            valid_indices = match_indices[match_indices + p < total_len]
-                            
-                            if len(valid_indices) == 0:
-                                results.append({"Days": p, "Win Rate": np.nan, "EV": np.nan, "Count": 0, "Profit Factor": np.nan})
-                                continue
-                                
-                            entry_prices = full_close[valid_indices]
-                            exit_prices = full_close[valid_indices + p]
-                            
-                            returns = (exit_prices - entry_prices) / entry_prices
-                            
-                            wins = returns[returns > 0]
-                            losses = returns[returns < 0]
-                            gross_win = np.sum(wins)
-                            gross_loss = np.abs(np.sum(losses))
-                            
-                            pf = gross_win / gross_loss if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
-                            
-                            win_rate = np.mean(returns > 0) * 100
-                            avg_ret = np.mean(returns) * 100
-                            
-                            results.append({
-                                "Days": p, 
-                                "Profit Factor": pf, 
-                                "Win Rate": win_rate, 
-                                "EV": avg_ret, 
-                                "Count": len(valid_indices)
-                            })
-
-                        res_df = pd.DataFrame(results)
-
-                        with c_right:
-                            if matches.empty:
-                                st.warning(f"No historical periods found where RSI was between {rsi_min:.2f} and {rsi_max:.2f}.")
-                            else:
-                                def highlight_best(row):
-                                    days = row['Days']
-                                    if days <= 20: threshold = 30
-                                    elif days <= 60: threshold = 20
-                                    else: threshold = 10
-                                    
-                                    condition = (row['Count'] >= threshold) and (row['Win Rate'] > 75)
-                                    color = 'background-color: rgba(144, 238, 144, 0.2)' if condition else ''
-                                    return [color] * len(row)
-
-                                def highlight_ret(val):
-                                    if val is None or pd.isna(val): return ''
-                                    if not isinstance(val, (int, float)): return ''
-                                    color = '#71d28a' if val > 0 else '#f29ca0'
-                                    return f'color: {color}; font-weight: bold;'
-                                
-                                format_func = lambda x: f"{x:+.2f}%" if pd.notnull(x) else "—"
-                                format_wr = lambda x: f"{x:.1f}%" if pd.notnull(x) else "—"
-                                format_pf = lambda x: f"{x:.2f}" if pd.notnull(x) else "—"
-
-                                st.dataframe(
-                                    res_df.style
-                                    .format({"Win Rate": format_wr, "EV": format_func, "Profit Factor": format_pf})
-                                    .map(highlight_ret, subset=["EV"])
-                                    .apply(highlight_best, axis=1)
-                                    .set_table_styles([dict(selector="th", props=[("font-weight", "bold"), ("background-color", "#f0f2f6")])]),
-                                    use_container_width=False,
-                                    column_config={
-                                        "Days": st.column_config.NumberColumn("Days", width=60),
-                                        "Profit Factor": st.column_config.NumberColumn("Profit Factor", width=80),
-                                        "Win Rate": st.column_config.TextColumn("Win Rate", width=80),
-                                        "EV": st.column_config.TextColumn("EV", width=80),
-                                        "Count": st.column_config.NumberColumn("Count", width=60)
-                                    },
-                                    hide_index=True
-                                )
-
-                        st.markdown("<br><br><br>", unsafe_allow_html=True)
-                
-st.markdown("""<style>
-.block-container{padding-top:3.5rem;padding-bottom:1rem;}
-.zones-panel{padding:14px 0; border-radius:10px;}
-.zone-row{display:flex; align-items:center; gap:10px; margin:8px 0;}
-.zone-label{width:90px; font-weight:700; text-align:right; flex-shrink: 0; font-size: 13px;}
-.zone-wrapper{
-    flex-grow: 1; 
-    position: relative; 
-    height: 24px; 
-    background-color: rgba(0,0,0,0.03);
-    border-radius: 4px;
-    overflow: hidden;
-}
-.zone-bar{
-    position: absolute;
-    left: 0; 
-    top: 0; 
-    bottom: 0; 
-    z-index: 1;
-    border-radius: 3px;
-    opacity: 0.65;
-}
-.zone-bull{background-color: #71d28a;}
-.zone-bear{background-color: #f29ca0;}
-.zone-value{
-    position: absolute;
-    right: 8px;
-    top: 0;
-    bottom: 0;
-    display: flex;
-    align-items: center;
-    z-index: 2;
-    font-size: 12px; 
-    font-weight: 700;
-    color: #1f1f1f;
-    white-space: nowrap;
-    text-shadow: 0 0 4px rgba(255,255,255,0.8);
-}
-.price-divider { display: flex; align-items: center; justify-content: center; position: relative; margin: 24px 0; width: 100%; }
-.price-divider::before, .price-divider::after { content: ""; flex-grow: 1; height: 2px; background: #66b7ff; opacity: 0.4; }
-.price-badge { background: rgba(102, 183, 255, 0.1); color: #66b7ff; border: 1px solid rgba(102, 183, 255, 0.5); border-radius: 16px; padding: 6px 14px; font-weight: 800; font-size: 12px; letter-spacing: 0.5px; white-space: nowrap; margin: 0 12px; z-index: 1; }
-.metric-row{display:flex;gap:10px;flex-wrap:wrap;margin:.35rem 0 .75rem 0}
-.badge{background: rgba(128, 128, 128, 0.08); border: 1px solid rgba(128, 128, 128, 0.2); border-radius:18px; padding:6px 10px; font-weight:700}
-.price-badge-header{background: rgba(102, 183, 255, 0.1); border: 1px solid #66b7ff; border-radius:18px; padding:6px 10px; font-weight:800}
-.light-note { opacity: 0.7; font-size: 14px; margin-bottom: 10px; }
-
-</style>""", unsafe_allow_html=True)
-
-try:
-    # Use empty dataframe as placeholder since db features were removed
-    df_placeholder = pd.DataFrame()
-    run_rsi_scanner_app(df_placeholder)
-    
-except Exception as e: 
-    st.error(f"Error initializing dashboard: {e}")
